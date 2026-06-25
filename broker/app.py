@@ -110,7 +110,7 @@ _limiter = (
 def parse_runner_name(name: str | None) -> tuple[str, str]:
     """Split a `gh-runner-<type>-<id>-<n>` runner name into (type, host).
 
-    `<id>` (the host/owner tag) may itself contain hyphens (e.g. `ci-linple`); `<n>` is always the
+    `<id>` (the host/owner tag) may itself contain hyphens (e.g. `my-host`); `<n>` is always the
     last segment, so type is the 3rd field and host is everything between it and the trailing number.
     Anything that doesn't fit the convention maps to ('unknown', name or 'unknown')."""
     if not name:

@@ -94,8 +94,8 @@ def test_endpoint_returns_429_when_limited(monkeypatch):
 
 
 def test_parse_runner_name_extracts_type_and_hyphenated_host():
-    assert parse_runner_name("gh-runner-light-ci-linple-1") == ("light", "ci-linple")
-    assert parse_runner_name("gh-runner-supabase-ci-linple-1") == ("supabase", "ci-linple")
+    assert parse_runner_name("gh-runner-light-my-host-1") == ("light", "my-host")
+    assert parse_runner_name("gh-runner-supabase-my-host-1") == ("supabase", "my-host")
     assert parse_runner_name("gh-runner-android-mymac-2") == ("android", "mymac")
 
 
@@ -112,21 +112,21 @@ def test_stats_aggregate_by_type_host_and_runner():
     clk = FakeClock()
     clk.t = 1000.0
     s = RunnerStats(window_s=100, max_events=100, clock=clk)
-    asyncio.run(s.record("token", "gh-runner-light-ci-linple-1"))
-    asyncio.run(s.record("token", "gh-runner-light-ci-linple-1"))
-    asyncio.run(s.record("token", "gh-runner-light-ci-linple-2"))
-    asyncio.run(s.record("remove-token", "gh-runner-supabase-ci-linple-1"))
+    asyncio.run(s.record("token", "gh-runner-light-my-host-1"))
+    asyncio.run(s.record("token", "gh-runner-light-my-host-1"))
+    asyncio.run(s.record("token", "gh-runner-light-my-host-2"))
+    asyncio.run(s.record("remove-token", "gh-runner-supabase-my-host-1"))
     snap = asyncio.run(s.snapshot())
 
     assert snap["totals"] == {"token": 3, "remove-token": 1}
     assert snap["by_type"]["light"]["token"] == 3
     assert snap["by_type"]["light"]["runners"] == 2  # two distinct light runners
     assert snap["by_type"]["supabase"]["remove-token"] == 1
-    assert snap["by_host"]["ci-linple"]["token"] == 3
+    assert snap["by_host"]["my-host"]["token"] == 3
     assert {r["name"] for r in snap["runners"]} == {
-        "gh-runner-light-ci-linple-1",
-        "gh-runner-light-ci-linple-2",
-        "gh-runner-supabase-ci-linple-1",
+        "gh-runner-light-my-host-1",
+        "gh-runner-light-my-host-2",
+        "gh-runner-supabase-my-host-1",
     }
 
 
@@ -167,7 +167,7 @@ class FakeRedisHttp:
 def test_redis_store_record_emits_correct_commands():
     fake = FakeRedisHttp(results=[1, 1, 0, 0, None])  # HINCRBY/HSET/SET return values (ignored)
     store = RedisStatsStore(url="https://redis.example.com", token="tok", http=fake)
-    asyncio.run(store.record("token", "gh-runner-light-ci-linple-1"))
+    asyncio.run(store.record("token", "gh-runner-light-my-host-1"))
 
     cmds = fake.captured
     # Must include HINCRBY on ghr:count:type for "light:token"
@@ -175,21 +175,21 @@ def test_redis_store_record_emits_correct_commands():
         c[0] == "HINCRBY" and c[1] == "ghr:count:type" and c[2] == "light:token"
         for c in cmds
     ), f"missing HINCRBY ghr:count:type light:token in {cmds}"
-    # Must include HINCRBY on ghr:count:host for "ci-linple:token"
+    # Must include HINCRBY on ghr:count:host for "my-host:token"
     assert any(
-        c[0] == "HINCRBY" and c[1] == "ghr:count:host" and c[2] == "ci-linple:token"
+        c[0] == "HINCRBY" and c[1] == "ghr:count:host" and c[2] == "my-host:token"
         for c in cmds
-    ), f"missing HINCRBY ghr:count:host ci-linple:token in {cmds}"
+    ), f"missing HINCRBY ghr:count:host my-host:token in {cmds}"
     # Must include HSET on ghr:last:type for "light"
     assert any(
         c[0] == "HSET" and c[1] == "ghr:last:type" and c[2] == "light"
         for c in cmds
     ), f"missing HSET ghr:last:type light in {cmds}"
-    # Must include HSET on ghr:last:host for "ci-linple"
+    # Must include HSET on ghr:last:host for "my-host"
     assert any(
-        c[0] == "HSET" and c[1] == "ghr:last:host" and c[2] == "ci-linple"
+        c[0] == "HSET" and c[1] == "ghr:last:host" and c[2] == "my-host"
         for c in cmds
-    ), f"missing HSET ghr:last:host ci-linple in {cmds}"
+    ), f"missing HSET ghr:last:host my-host in {cmds}"
     # Must include SET ghr:since ... NX
     assert any(
         c[0] == "SET" and c[1] == "ghr:since" and c[-1] == "NX"
@@ -201,9 +201,9 @@ def test_redis_store_snapshot_parses_pipeline_response():
     # Canned flat HGETALL responses from Upstash ([field, value, field, value, ...])
     # and a since value. Simulates two runner types: light (5 tokens) and supabase (1 remove-token).
     count_type_flat = ["light:token", "5", "supabase:remove-token", "1"]
-    count_host_flat = ["ci-linple:token", "5", "ci-linple:remove-token", "1"]
+    count_host_flat = ["my-host:token", "5", "my-host:remove-token", "1"]
     last_type_flat = ["light", "1700000000", "supabase", "1700000100"]
-    last_host_flat = ["ci-linple", "1700000100"]
+    last_host_flat = ["my-host", "1700000100"]
     since_val = "1699999999"
 
     fake = FakeRedisHttp(results=[
@@ -223,8 +223,8 @@ def test_redis_store_snapshot_parses_pipeline_response():
     assert snap["by_type"]["light"]["token"] == 5
     assert snap["by_type"]["light"]["remove-token"] == 0
     assert snap["by_type"]["supabase"]["remove-token"] == 1
-    assert snap["by_host"]["ci-linple"]["token"] == 5
-    assert snap["by_host"]["ci-linple"]["remove-token"] == 1
+    assert snap["by_host"]["my-host"]["token"] == 5
+    assert snap["by_host"]["my-host"]["remove-token"] == 1
     assert snap["since"] is not None  # ISO string from since_val
 
 
@@ -236,7 +236,7 @@ def test_redis_store_record_swallows_errors():
 
     store = RedisStatsStore(url="https://redis.example.com", token="tok", http=bad_http)
     # Must not raise
-    asyncio.run(store.record("token", "gh-runner-light-ci-linple-1"))
+    asyncio.run(store.record("token", "gh-runner-light-my-host-1"))
 
 
 # --- SupabaseStatsStore tests --------------------------------------------------------------------
@@ -258,7 +258,7 @@ class FakeSupabaseHttp:
 def test_supabase_store_record_issues_two_rpc_calls():
     fake = FakeSupabaseHttp(responses={"/rest/v1/rpc/record_runner_event": None})
     store = SupabaseStatsStore(url="https://proj.supabase.co", service_key="svckey", http=fake)
-    asyncio.run(store.record("token", "gh-runner-light-ci-linple-1"))
+    asyncio.run(store.record("token", "gh-runner-light-my-host-1"))
 
     rpc_calls = [c for c in fake.calls if c[1] == "/rest/v1/rpc/record_runner_event"]
     assert len(rpc_calls) == 2, f"expected 2 RPC calls, got {len(rpc_calls)}: {rpc_calls}"
@@ -271,7 +271,7 @@ def test_supabase_store_record_issues_two_rpc_calls():
 
     assert type_call[2]["json"]["p_key"] == "light"
     assert type_call[2]["json"]["p_kind"] == "token"
-    assert host_call[2]["json"]["p_key"] == "ci-linple"
+    assert host_call[2]["json"]["p_key"] == "my-host"
     assert host_call[2]["json"]["p_kind"] == "token"
 
 
@@ -280,8 +280,8 @@ def test_supabase_store_snapshot_parses_rows():
     stats_rows = [
         {"dimension": "type", "key": "light",    "kind": "token",        "count": 5,  "last_seen": "2026-06-25T08:00:00+00:00"},
         {"dimension": "type", "key": "supabase", "kind": "remove-token", "count": 1,  "last_seen": "2026-06-25T09:00:00+00:00"},
-        {"dimension": "host", "key": "ci-linple","kind": "token",        "count": 5,  "last_seen": "2026-06-25T08:00:00+00:00"},
-        {"dimension": "host", "key": "ci-linple","kind": "remove-token", "count": 1,  "last_seen": "2026-06-25T09:00:00+00:00"},
+        {"dimension": "host", "key": "my-host","kind": "token",        "count": 5,  "last_seen": "2026-06-25T08:00:00+00:00"},
+        {"dimension": "host", "key": "my-host","kind": "remove-token", "count": 1,  "last_seen": "2026-06-25T09:00:00+00:00"},
     ]
     meta_rows = [{"since": "2026-06-01T00:00:00+00:00"}]
 
@@ -299,8 +299,8 @@ def test_supabase_store_snapshot_parses_rows():
     assert snap["by_type"]["light"]["token"] == 5
     assert snap["by_type"]["light"]["remove-token"] == 0
     assert snap["by_type"]["supabase"]["remove-token"] == 1
-    assert snap["by_host"]["ci-linple"]["token"] == 5
-    assert snap["by_host"]["ci-linple"]["remove-token"] == 1
+    assert snap["by_host"]["my-host"]["token"] == 5
+    assert snap["by_host"]["my-host"]["remove-token"] == 1
     assert snap["since"] == "2026-06-01T00:00:00+00:00"
 
 
@@ -311,7 +311,7 @@ def test_supabase_store_record_swallows_errors():
         raise RuntimeError("network error")
 
     store = SupabaseStatsStore(url="https://proj.supabase.co", service_key="svckey", http=bad_http)
-    asyncio.run(store.record("token", "gh-runner-light-ci-linple-1"))
+    asyncio.run(store.record("token", "gh-runner-light-my-host-1"))
 
 
 def test_selector_defaults_to_memory_when_no_creds():

@@ -37,7 +37,7 @@ Runners register as **`gh-runner-<type>-<id>-<n>`** — `<type>` is the runner t
 (`light`/`supabase`/`android`/`ios`), `<id>` identifies the host or user (defaults to the host short
 name; set with `--owner` on the installers or `OWNER` in compose), `<n>` is the instance number
 (auto from `--count` for systemd installs; `RUNNER_NUMBER` for the Docker variants). E.g. two light
-runners on host `ci-linple` register as `gh-runner-light-ci-linple-1` and `-2`. The name is **fixed
+runners on host `my-host` register as `gh-runner-light-my-host-1` and `-2`. The name is **fixed
 per instance** — each ephemeral cycle re-registers it with `--replace`.
 
 > Why Docker only for android: the emulator wants a reproducible SDK/Maestro image and clean per-job

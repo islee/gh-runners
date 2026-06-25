@@ -83,9 +83,9 @@ curl -fsS -H "Authorization: Bearer $BROKER_SECRET" https://<service>/stats | jq
   "fleet": {
     "total": 4, "online": 3, "busy": 1,
     "by_type": { "light": { "total": 2, "online": 2, "busy": 0 }, … },
-    "by_host": { "ci-linple": { "total": 4, "online": 3, "busy": 1 } },
+    "by_host": { "my-host": { "total": 4, "online": 3, "busy": 1 } },
     "runners": [
-      { "name": "gh-runner-light-ci-linple-1", "type": "light", "host": "ci-linple",
+      { "name": "gh-runner-light-my-host-1", "type": "light", "host": "my-host",
         "status": "online", "busy": false, "labels": ["self-hosted","light"] }, … ]
   },
   "activity": {
@@ -94,7 +94,7 @@ curl -fsS -H "Authorization: Bearer $BROKER_SECRET" https://<service>/stats | jq
     "since": "2026-06-01T00:00:00Z",
     "totals": { "token": 40, "remove-token": 2 },
     "by_type": { "light": { "token": 28, "remove-token": 0, "last_seen": "…" }, … },
-    "by_host": { "ci-linple": { "token": 40, "remove-token": 2, "last_seen": "…" } }
+    "by_host": { "my-host": { "token": 40, "remove-token": 2, "last_seen": "…" } }
   }
 }
 ```
