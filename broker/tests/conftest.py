@@ -5,6 +5,7 @@ missing, so the test suite must populate the environment first. The functional t
 GitHub, so a placeholder private key is sufficient. RATE_LIMIT is set high here so ordinary
 auth/health tests don't trip it; the rate-limit tests install their own small limiter.
 """
+
 import os
 
 os.environ.setdefault("GH_APP_ID", "123456")

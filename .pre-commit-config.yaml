@@ -1,0 +1,52 @@
+# Pre-commit lint + test + secret gate. Install once:  pre-commit install
+# Run on demand:  pre-commit run --all-files
+# Broker tests need the dev deps once:  pip install -r broker/requirements-dev.txt
+# CI runs the same hooks (.github/workflows/ci.yml), so local == CI.
+
+repos:
+  # ── Hygiene + secret safety ──────────────────────────────────────────────
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-merge-conflict
+      - id: check-added-large-files
+      - id: detect-private-key        # blocks committing a .pem / .key
+
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.18.4
+    hooks:
+      - id: gitleaks                  # broad secret scan (tokens, high-entropy strings)
+
+  # ── Lint ─────────────────────────────────────────────────────────────────
+  - repo: https://github.com/koalaman/shellcheck-precommit
+    rev: v0.10.0
+    hooks:
+      - id: shellcheck
+        args: [--severity=warning, --exclude=SC1091]
+
+  - repo: https://github.com/hadolint/hadolint
+    rev: v2.12.0
+    hooks:
+      - id: hadolint-docker
+        args: [--config, .hadolint.yaml]
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.6.9
+    hooks:
+      - id: ruff                      # broker lint
+        files: ^broker/.*\.py$
+      - id: ruff-format               # broker format
+        files: ^broker/.*\.py$
+
+  # ── Test ─────────────────────────────────────────────────────────────────
+  - repo: local
+    hooks:
+      - id: broker-pytest
+        name: broker pytest
+        entry: bash -c 'cd broker && pytest -q'
+        language: system             # needs: pip install -r broker/requirements-dev.txt
+        files: ^broker/
+        pass_filenames: false

@@ -15,6 +15,7 @@ NOTE: labels are chosen by the runner at `config.sh --labels` time and are NOT e
 registration token, so the broker CANNOT enforce them — it only logs the caller (X-Runner-Name)
 for attribution. Use GitHub *runner groups* to scope what runners may do.
 """
+
 from __future__ import annotations
 
 import hmac
@@ -80,14 +81,14 @@ class RateLimiter:
         # Bound memory: when the table grows large, evict fully-refilled (idle) buckets — dropping
         # them is lossless since a missing key starts at full capacity anyway.
         if len(self._buckets) > self._max_keys:
-            self._buckets = {
-                k: v for k, v in self._buckets.items() if v[0] < self.capacity - 1e-9
-            }
+            self._buckets = {k: v for k, v in self._buckets.items() if v[0] < self.capacity - 1e-9}
         return True
 
 
 # Disabled (None) when RATE_LIMIT_PER_MINUTE<=0.
-_limiter = RateLimiter(RATE_LIMIT_PER_MINUTE, RATE_LIMIT_BURST) if RATE_LIMIT_PER_MINUTE > 0 else None
+_limiter = (
+    RateLimiter(RATE_LIMIT_PER_MINUTE, RATE_LIMIT_BURST) if RATE_LIMIT_PER_MINUTE > 0 else None
+)
 
 
 def _client_key(request: Request) -> str:
@@ -103,13 +104,17 @@ def _rate_limit(request: Request) -> None:
     if _limiter is not None and not _limiter.allow(_client_key(request)):
         # Retry-After of one refill period is a safe, simple hint.
         retry = max(1, round(60 / RATE_LIMIT_PER_MINUTE))
-        raise HTTPException(status_code=429, detail="rate limited", headers={"Retry-After": str(retry)})
+        raise HTTPException(
+            status_code=429, detail="rate limited", headers={"Retry-After": str(retry)}
+        )
 
 
 def _app_jwt() -> str:
     """A short-lived RS256 JWT identifying the App (GitHub caps exp at 10 minutes)."""
     now = int(time.time())
-    return jwt.encode({"iat": now - 60, "exp": now + 540, "iss": APP_ID}, PRIVATE_KEY, algorithm="RS256")
+    return jwt.encode(
+        {"iat": now - 60, "exp": now + 540, "iss": APP_ID}, PRIVATE_KEY, algorithm="RS256"
+    )
 
 
 async def _installation_token(client: httpx.AsyncClient) -> str:

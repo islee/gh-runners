@@ -5,6 +5,7 @@ GitHub API and would need a real App key + network, so it is out of scope. The R
 unit-tested directly with a fake clock for determinism, plus one endpoint test proving the limit
 runs ahead of auth (a throttled request returns 429, not 401).
 """
+
 import app as appmod
 from app import RateLimiter, app
 from fastapi.testclient import TestClient
@@ -73,7 +74,9 @@ def test_limiter_keys_are_independent():
 
 def test_endpoint_returns_429_when_limited(monkeypatch):
     # burst=2: first two requests pass the limiter (then 401 on auth); the third is throttled.
-    monkeypatch.setattr(appmod, "_limiter", RateLimiter(rate_per_min=60, burst=2, clock=FakeClock()))
+    monkeypatch.setattr(
+        appmod, "_limiter", RateLimiter(rate_per_min=60, burst=2, clock=FakeClock())
+    )
     monkeypatch.setattr(appmod, "RATE_LIMIT_PER_MINUTE", 60)
     assert client.post("/token").status_code == 401
     assert client.post("/token").status_code == 401

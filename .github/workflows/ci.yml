@@ -1,42 +1,29 @@
-name: lint
+name: ci
 
-# Static checks only — shellcheck for the runner scripts, hadolint for the Dockerfiles.
-# Functional checks (actually registering a runner / booting the emulator / a supabase stack) need
-# real hosts + credentials + KVM and can't run here; see each dir's README "first build" notes.
+# Single source of truth: run the same pre-commit hooks CI and locally.
+# Hooks: shellcheck + hadolint + ruff (lint), broker pytest (test), detect-private-key +
+# gitleaks (secret scan), plus YAML/whitespace hygiene. See .pre-commit-config.yaml.
 
 on:
   push:
     branches: [main]
   pull_request:
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  lint:
+  checks:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: shellcheck (scripts)
-        # ubuntu-latest ships shellcheck. -e SC1091: config.env is sourced at runtime, not present here.
-        run: shellcheck -S warning -e SC1091 $(find . -name '*.sh' -not -path './.git/*')
-
-      - name: hadolint (Dockerfiles)
-        run: |
-          curl -fsSL -o /usr/local/bin/hadolint \
-            https://github.com/hadolint/hadolint/releases/download/v2.12.0/hadolint-Linux-x86_64
-          chmod +x /usr/local/bin/hadolint
-          find . -name Dockerfile -not -path './.git/*' -exec hadolint --config .hadolint.yaml {} +
-
-  broker:
-    # The token broker (broker/) is a Python FastAPI app — lint + unit-test it.
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: broker
-    steps:
-      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # gitleaks scans history on PRs
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install -r requirements-dev.txt
-      - run: ruff check .
-      - run: pytest -q
+      - name: Install pre-commit + broker dev deps
+        run: pip install pre-commit -r broker/requirements-dev.txt
+      - name: Run gate (lint + tests + secret scan)
+        run: pre-commit run --all-files --show-diff-on-failure
