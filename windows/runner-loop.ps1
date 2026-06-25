@@ -12,9 +12,11 @@
     Token priority (checked in order): RUNNER_TOKEN (static) -> BROKER_URL (broker) -> ACCESS_TOKEN (PAT).
     config.env (ACL-restricted, written by install.ps1) lives in this script's dir and supplies the values.
 
-    Graceful shutdown: when the scheduled task is stopped (Stop-ScheduledTask / system shutdown),
-    PowerShell's process termination is caught via a finally block and a Console CancelKeyPress handler
-    to deregister the runner before exit.
+    Graceful shutdown: a finally block makes a BEST-EFFORT deregister when the loop exits normally or
+    on a soft stop. A hard task kill (Stop-ScheduledTask force-terminating the process) may skip it, so
+    it is NOT authoritative — uninstall.ps1 performs the reliable removal (mint remove-token +
+    config.cmd remove). Worst case a stale "offline" entry lingers until GitHub prunes it or the next
+    --replace cycle reclaims the name.
 
     NOTE: All logs go to the host's Application event log (source gh-runner) AND to the runner's own
     _diag\ directory (written by run.cmd). To follow logs:
@@ -231,8 +233,8 @@ try {
         }
     }
 } finally {
-    # WHY finally: PowerShell executes finally even on process termination (Ctrl+C, Stop-ScheduledTask,
-    # system shutdown — all send CTRL_BREAK_EVENT which PowerShell converts to a terminating exception).
-    Log "Loop exiting — running deregister."
+    # Best-effort deregister on a clean/soft exit. A hard task kill may skip this finally entirely —
+    # uninstall.ps1 is the authoritative removal path. See the .DESCRIPTION note.
+    Log "Loop exiting — best-effort deregister."
     Invoke-Deregister
 }

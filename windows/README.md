@@ -13,8 +13,9 @@ inbound ports).
 - Windows 10 / 11 or Windows Server 2019+ (`x64`).
 - PowerShell 5.1 or later (ships in-box on all supported Windows versions).
 - **Administrator rights** for install: Task Scheduler 'run whether logged on or not' and the
-  ACL restriction on `config.env` both require elevation. The runner loop itself runs under
-  `NT AUTHORITY\SYSTEM` (set by the scheduled task — no interactive session needed).
+  ACL restriction on `config.env` both require elevation. By default the runner loop runs under
+  `NT AUTHORITY\SYSTEM` (no interactive session needed) — but that means **CI jobs run as SYSTEM**.
+  Pass `-RunAsUser`/`-RunAsPassword` to confine jobs to a non-admin account (see [Security](#security)).
 - Internet access to `github.com` and `api.github.com` (outbound HTTPS only).
 - One credential — see [Credentials](#credentials).
 
@@ -33,6 +34,10 @@ Copy this `windows\` directory to the host, then open an **elevated PowerShell**
 
 # Model A — static token (quick one-off; expires ~1h)
 .\install.ps1 -Org your-org -Token <REG_TOKEN> -Count 1
+
+# Least-privilege: confine jobs to a non-admin local user instead of SYSTEM
+.\install.ps1 -Org your-org -BrokerUrl https://<broker> -BrokerSecret <secret> `
+  -RunAsUser ".\gh-runner" -RunAsPassword "<password>"
 ```
 
 `install.ps1` downloads `actions/runner` win-x64 zip, expands it into one dir per instance under
@@ -48,6 +53,8 @@ Copy this `windows\` directory to the host, then open an **elevated PowerShell**
 | `-Count` | `1` | Number of concurrent runner instances |
 | `-Owner` | `$env:COMPUTERNAME` | `<id>` in the runner name `gh-runner-windows-<id>-<n>` (use a username on a shared fleet) |
 | `-RunnerBase` | `C:\actions-runner-windows` | Parent dir; instance `i` lives at `<base>\<i>` |
+| `-RunAsUser` | _(empty → SYSTEM)_ | Non-admin local user to run the task/jobs as. Confines jobs off SYSTEM. Requires `-RunAsPassword`. |
+| `-RunAsPassword` | — | Password for `-RunAsUser` (stored by the task so it runs whether logged on or not) |
 | `-RunnerVersion` | pinned | Bump when GitHub rejects the pinned version |
 
 > **Runner names:** each instance registers as `gh-runner-windows-<owner>-<i>` (the
@@ -73,7 +80,7 @@ Supply exactly one (priority high → low):
 # Check task state for all instances
 Get-ScheduledTask -TaskName 'gh-runner-windows@*'
 
-# Start / stop a specific instance (stop triggers the finally-block deregister in runner-loop.ps1)
+# Start / stop a specific instance (stop is best-effort deregister; uninstall.ps1 is authoritative)
 Start-ScheduledTask -TaskName 'gh-runner-windows@1'
 Stop-ScheduledTask  -TaskName 'gh-runner-windows@1'
 
@@ -99,9 +106,11 @@ Get-ChildItem 'C:\actions-runner-windows\1\_diag\Runner_*.log' | Select-Object -
 .\uninstall.ps1 -Count 2 -RunnerBase C:\actions-runner-windows -Purge
 ```
 
-`uninstall.ps1` stops and unregisters each scheduled task, which fires `runner-loop.ps1`'s `finally`
-block to deregister the runner from GitHub. Any runner still visible in org → Settings → Actions →
-Runners after uninstall was mid-job or had an expired deregister token — remove those manually.
+`uninstall.ps1` stops each scheduled task, **directly deregisters** the runner from GitHub (mints a
+remove-token from the broker/PAT in `config.env` and runs `config.cmd remove`), then unregisters the
+task. This is authoritative — it doesn't rely on `runner-loop.ps1`'s best-effort `finally`. A runner
+still visible in org → Settings → Actions → Runners afterward was likely mid-job or used a static
+token (no remove-token) — remove those manually.
 
 ## Security
 
@@ -113,9 +122,15 @@ Runners execute workflow code on this host. Mitigations:
   secrets. Use model B (broker) or a scoped PAT; never embed an admin PAT.
 - **Outbound-only** — runners poll GitHub; no inbound ports or ingress to open or expose.
 - **config.env ACL** — `install.ps1` removes all inherited permissions and grants only SYSTEM and
-  Administrators read access, preventing other local accounts from reading credentials at rest.
-- **Runs as SYSTEM** — the scheduled task runs under `NT AUTHORITY\SYSTEM` with no stored user
-  password, so credential rotation never blocks restarts.
+  Administrators (plus a `-RunAsUser`, read-only), preventing other local accounts from reading
+  credentials at rest.
+- **Job execution identity (important)** — by default the task runs as `NT AUTHORITY\SYSTEM`, which is
+  zero-setup but means **jobs run with full SYSTEM privileges**. On a shared or personal machine,
+  prefer `-RunAsUser ".\gh-runner" -RunAsPassword <pw>` with a **dedicated non-admin local user** so a
+  malicious or compromised job is confined to that account. install.ps1 grants the user read on
+  `config.env` and modify on its runner dir; the account may also need the *Log on as a batch job*
+  right (Register-ScheduledTask grants it on most systems). Trade-off: the password is stored in the
+  task (rotate it there if it changes).
 - **Don't route untrusted fork PRs here** — gate E2E or time-consuming jobs on nightly `main` builds
   or a maintainer-applied label, never automatically on `pull_request` from forks.
 
