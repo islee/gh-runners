@@ -1,0 +1,24 @@
+# Containerized "light" runner — one container per job (ephemeral), re-spawned by restart: always.
+#
+# Scale to N concurrent runners with:  docker compose up -d --build --scale runner=2
+# (no container_name / no published ports, so scaling is safe.)
+#
+# Credentials: copy env.example -> .env and set ONE of RUNNER_TOKEN / BROKER_URL(+BROKER_SECRET) /
+# ACCESS_TOKEN. .env is gitignored.
+
+services:
+  runner:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    # Compose auto-reads .env from this dir and passes it to the container.
+    env_file: .env
+    environment:
+      # Defaults if not set in .env. RUNNER_LABELS must match the workflow's runs-on:.
+      GH_ORG: ${GH_ORG:-your-org}
+      RUNNER_LABELS: ${RUNNER_LABELS:-self-hosted,linux,x64,light}
+    # One job per container, then exit; restart brings up a fresh one to re-register.
+    restart: always
+    # Resource caps (Compose v2 standalone top-level keys; deploy.resources is swarm-only/ignored).
+    cpus: ${RUNNER_CPUS:-2}
+    mem_limit: ${RUNNER_MEM:-2g}

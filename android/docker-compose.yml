@@ -1,0 +1,64 @@
+# Android E2E self-hosted runner — Docker Compose
+#
+# One service: runner-android.
+# Each container lives for exactly one GH Actions job (--ephemeral in entrypoint.sh),
+# then exits. `restart: always` brings a fresh container up immediately to re-register
+# and wait for the next job.
+#
+# Prerequisites on the host:
+#   /dev/kvm must exist and the docker user must be in the `kvm` group.
+#   Run `ls -l /dev/kvm` and `kvm-ok` to verify before starting.
+
+services:
+  runner-android:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        # Override these at build time to change the Android API / target / arch.
+        ANDROID_API: ${ANDROID_API:-34}
+        ANDROID_TARGET: ${ANDROID_TARGET:-google_apis}
+        ANDROID_ARCH: ${ANDROID_ARCH:-x86_64}
+        NODE_MAJOR: ${NODE_MAJOR:-20}
+        MAESTRO_VERSION: ${MAESTRO_VERSION:-1.39.13}
+
+    # Compose reads .env from the same directory automatically; users should
+    # copy env.example → .env and fill in their credentials.
+    env_file: .env
+
+    # Runner display name — shown in org Settings > Actions > Runners.
+    # RUNNER_NAME_PREFIX from .env provides the base; hostname adds per-container uniqueness
+    # when you scale replicas on the same host.
+    container_name: ${RUNNER_NAME_PREFIX:-android-runner}
+
+    environment:
+      # Derive runner name from the prefix + container hostname for uniqueness.
+      RUNNER_NAME: "${RUNNER_NAME_PREFIX:-android-runner}-${HOSTNAME:-}"
+      # GH org slug — must match exactly (case-sensitive).
+      GH_ORG: "${GH_ORG:-your-org}"
+      RUNNER_LABELS: "${RUNNER_LABELS:-self-hosted,mobile,android}"
+
+    devices:
+      # KVM passthrough — required for hardware-accelerated Android emulation.
+      # Without this, the emulator falls back to software (unusably slow for CI).
+      - "/dev/kvm:/dev/kvm"
+
+    # The container user must be able to open /dev/kvm. The device is owned by group `kvm`
+    # on the host with a host-specific GID; pass that GID via KVM_GID in .env so the runner
+    # user gains access. `kvm-ok` / `getent group kvm` on the host shows it. If unset, the
+    # emulator may fail with EACCES on /dev/kvm — see README troubleshooting.
+    group_add:
+      - "${KVM_GID:-kvm}"
+
+    # Resource caps — protect the host machine from a runaway job.
+    # IMPORTANT: these are the top-level (Compose v2 standalone) keys. The `deploy.resources`
+    # block is Swarm-only and is SILENTLY IGNORED by `docker compose up`, so use these keys.
+    # Override via RUNNER_CPUS / RUNNER_MEM in .env.
+    cpus: ${RUNNER_CPUS:-4}
+    mem_limit: ${RUNNER_MEM:-6g}
+
+    restart: always
+
+    # NOTE: no network_mode: host needed here. The Android emulator's adb server runs inside
+    # the container and is accessed via localhost within the same container, so no host-network
+    # bridge is required (unlike runners that need to reach a sibling Docker stack on loopback).

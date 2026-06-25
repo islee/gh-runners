@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<!--
+  com.example.ci-runner.plist — LaunchAgent for the iOS/Android-on-Mac self-hosted runner.
+
+  IMPORTANT: This file is a TEMPLATE. install.sh performs two sed substitutions before
+  writing to ~/Library/LaunchAgents/:
+    __RUNNER_DIR__  -> absolute path of the runner install dir (default: ~/actions-runner-e2e,
+                       expanded to the real path by install.sh — e.g. /Users/alice/actions-runner-e2e)
+    __LOG_DIR__     -> absolute path of the log dir (default: ~/Library/Logs, expanded likewise)
+
+  Do not load this template directly; always go through install.sh.
+
+  NOTE: customize the Label below to match your team's reverse-DNS domain
+  (e.g. com.acme.ci-runner) if deploying multiple runners on the same machine.
+
+  KeepAlive=true causes launchd to restart runner-loop.sh if it exits unexpectedly.
+  runner-loop.sh itself loops forever; a clean exit only happens via uninstall.sh.
+-->
+<dict>
+  <key>Label</key>
+  <string>com.example.ci-runner</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <!-- WHY: invoke bash explicitly so launchd doesn't require runner-loop.sh to be in $PATH.
+         LaunchAgent environments have a minimal PATH and may not find the shebang interpreter. -->
+    <string>/bin/bash</string>
+    <string>__RUNNER_DIR__/runner-loop.sh</string>
+  </array>
+
+  <!-- Start immediately when the plist is loaded and on every user login. -->
+  <key>RunAtLoad</key>
+  <true/>
+
+  <!-- Restart runner-loop.sh automatically if it exits unexpectedly. -->
+  <key>KeepAlive</key>
+  <true/>
+
+  <!-- Throttle restarts: if runner-loop.sh exits immediately (e.g. config.env missing), don't
+       respawn faster than every 30s. Prevents a tight crash-loop from flooding the logs. -->
+  <key>ThrottleInterval</key>
+  <integer>30</integer>
+
+  <!-- WorkingDirectory ensures relative paths inside runner-loop.sh resolve correctly.
+       NOTE: This is also rewritten from __RUNNER_DIR__ by install.sh. -->
+  <key>WorkingDirectory</key>
+  <string>__RUNNER_DIR__</string>
+
+  <!-- NOTE: stdout and stderr go to separate files for unambiguous log tailing.
+       'tail -f ~/Library/Logs/ci-runner.out.log' to follow runner output. -->
+  <key>StandardOutPath</key>
+  <string>__LOG_DIR__/ci-runner.out.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>__LOG_DIR__/ci-runner.err.log</string>
+
+</dict>
+</plist>

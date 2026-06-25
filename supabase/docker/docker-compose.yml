@@ -1,0 +1,36 @@
+# Containerized "supabase" runner — one container per job, drives the HOST Docker daemon.
+#
+# This variant reintroduces the docker-out-of-docker plumbing that the host-level (systemd) variant
+# in ../ avoids. Prefer ../ (no Docker around the runner) unless you specifically want the runner
+# itself containerized. Count is 1 (a Supabase stack is several GB).
+
+services:
+  runner:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file: .env
+    environment:
+      GH_ORG: ${GH_ORG:-your-org}
+      RUNNER_LABELS: ${RUNNER_LABELS:-self-hosted,linux,x64,supabase}
+      # Work dir bind-mounted at the SAME absolute path host↔container (see volumes). Load-bearing:
+      # the host daemon resolves job bind-mounts by HOST path, so the paths must be identical.
+      RUNNER_WORKDIR: ${RUNNER_WORKDIR:-/opt/runner-work/supabase}
+
+    # GOTCHA 1 — host networking. The job curls http://127.0.0.1:54321 etc. With the host's network
+    # namespace, 127.0.0.1 resolves where Supabase published its ports (on the host).
+    network_mode: host
+
+    volumes:
+      # GOTCHA 2 — share the host Docker daemon (docker-out-of-docker; the job runs `supabase start`).
+      - /var/run/docker.sock:/var/run/docker.sock
+      # GOTCHA 3 — identical-path workspace bind so host-daemon bind-mounts in the job resolve.
+      - ${RUNNER_WORKDIR:-/opt/runner-work/supabase}:${RUNNER_WORKDIR:-/opt/runner-work/supabase}
+
+    # The `runner` user must be in the host docker socket's group to use the socket.
+    # Find the GID: `getent group docker | cut -d: -f3`, then set DOCKER_GID in .env.
+    group_add:
+      - "${DOCKER_GID:-docker}"
+
+    restart: always
+    mem_limit: ${RUNNER_MEM:-6g}

@@ -1,0 +1,27 @@
+# Systemd template unit for an ephemeral GitHub Actions runner (vanilla actions/runner).
+#
+# This is a TEMPLATE: install.sh sed-substitutes __RUNNER_BASE__ and __RUN_USER__ and writes the
+# result to /etc/systemd/system/ci-runner@.service, then enables one instance per runner dir
+# (ci-runner@1, ci-runner@2, ...). Each instance %i maps to __RUNNER_BASE__/%i, which holds its own
+# actions/runner install + config.env (mode 600) + runner-loop.sh.
+#
+# Do not install this template by hand; run install.sh.
+
+[Unit]
+Description=Ephemeral GitHub Actions runner (instance %i)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__RUN_USER__
+WorkingDirectory=__RUNNER_BASE__/%i
+ExecStart=/bin/bash __RUNNER_BASE__/%i/runner-loop.sh
+Restart=always
+RestartSec=10
+# Give runner-loop.sh time to deregister (SIGTERM trap) before systemd SIGKILLs it.
+KillSignal=SIGTERM
+TimeoutStopSec=45
+
+[Install]
+WantedBy=multi-user.target

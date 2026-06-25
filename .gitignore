@@ -1,0 +1,22 @@
+# Credentials & runner state — NEVER commit.
+# The only committed config is the *.example templates (which end in .example, not .env).
+.env
+*.env
+config.env
+*.pem
+*.key
+secrets/
+
+# actions/runner install + working artifacts (if someone installs in-tree)
+actions-runner*/
+_work/
+_diag/
+.runner
+.credentials*
+.runner-version
+*.tar.gz
+
+# OS / editor / tooling
+.DS_Store
+__pycache__/
+*.pyc
