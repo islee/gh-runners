@@ -61,10 +61,13 @@ RUNNER_LABELS="${RUNNER_LABELS:-${DEFAULT_LABELS}}"
 RUNNER_DIR="${RUNNER_DIR:-${DEFAULT_RUNNER_DIR}}"
 RUNNER_VERSION="${RUNNER_VERSION:-${DEFAULT_RUNNER_VERSION}}"
 ALLOW_BATTERY="${ALLOW_BATTERY:-0}"
+# <id> segment of the gh-runner-<type>-<id>-<n> name; default the host short name, override --owner.
+OWNER="${OWNER:-$(hostname -s)}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --org)            GH_ORG="$2";           shift 2 ;;
+    --owner)          OWNER="$2";            shift 2 ;;
     --token)          RUNNER_TOKEN="$2";     shift 2 ;;
     --broker-url)     BROKER_URL="$2";       shift 2 ;;
     --broker-secret)  BROKER_SECRET="$2";    shift 2 ;;
@@ -172,6 +175,7 @@ install -m 600 /dev/null "${CONFIG_ENV}"
   printf '# IMPORTANT: chmod 600 is enforced at creation time; do not loosen permissions.\n'
   printf 'GH_ORG="%s"\n'           "${GH_ORG}"
   printf 'RUNNER_LABELS="%s"\n'    "${RUNNER_LABELS}"
+  printf 'RUNNER_NAME="%s"\n'      "gh-runner-ios-${OWNER}-1"
   printf 'RUNNER_DIR="%s"\n'       "${RUNNER_DIR}"
   printf 'RUNNER_TOKEN="%s"\n'     "${RUNNER_TOKEN}"
   printf 'BROKER_URL="%s"\n'       "${BROKER_URL}"

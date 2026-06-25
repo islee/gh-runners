@@ -22,6 +22,7 @@ set -euo pipefail
 readonly DEFAULT_RUNNER_VERSION="2.335.1"
 readonly DEFAULT_ORG="your-org"
 readonly DEFAULT_LABELS="self-hosted,linux,x64,supabase"
+readonly RUNNER_TYPE="supabase"   # <type> in the gh-runner-<type>-<id>-<n> name convention
 readonly DEFAULT_COUNT=1
 readonly DEFAULT_RUNNER_BASE="/opt/ci-runner-supabase"
 readonly SERVICE_NAME="ci-runner@.service"
@@ -33,6 +34,9 @@ COUNT="${COUNT:-${DEFAULT_COUNT}}"
 RUNNER_BASE="${RUNNER_BASE:-${DEFAULT_RUNNER_BASE}}"
 RUNNER_VERSION="${RUNNER_VERSION:-${DEFAULT_RUNNER_VERSION}}"
 RUN_USER="${RUN_USER:-${SUDO_USER:-${USER}}}"
+# <id> segment of the name (gh-runner-<type>-<id>-<n>): a user or host tag. Default the host short
+# name; override with --owner (e.g. a username on a shared multi-host fleet).
+OWNER="${OWNER:-$(hostname -s)}"
 # Credential vars — default-init (empty) without a quoted assignment literal.
 : "${RUNNER_TOKEN:=}"
 : "${BROKER_URL:=}"
@@ -50,6 +54,7 @@ while [[ $# -gt 0 ]]; do
     --access-token)   ACCESS_TOKEN="$2";    shift 2 ;;
     --count)          COUNT="$2";           shift 2 ;;
     --user)           RUN_USER="$2";        shift 2 ;;
+    --owner)          OWNER="$2";           shift 2 ;;
     --runner-base)    RUNNER_BASE="$2";     shift 2 ;;
     --runner-version) RUNNER_VERSION="$2";  shift 2 ;;
     *) echo "Unknown flag: $1" >&2
@@ -112,6 +117,7 @@ for i in $(seq 1 "${COUNT}"); do
   } > "${CONFIG_ENV}"
   _write_kv GH_ORG        "${GH_ORG}"        "${CONFIG_ENV}"
   _write_kv RUNNER_LABELS "${RUNNER_LABELS}" "${CONFIG_ENV}"
+  _write_kv RUNNER_NAME   "gh-runner-${RUNNER_TYPE}-${OWNER}-${i}" "${CONFIG_ENV}"
   _write_kv RUNNER_TOKEN  "${RUNNER_TOKEN}"  "${CONFIG_ENV}"
   _write_kv BROKER_URL    "${BROKER_URL}"    "${CONFIG_ENV}"
   _write_kv BROKER_SECRET "${BROKER_SECRET}" "${CONFIG_ENV}"

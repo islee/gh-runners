@@ -37,6 +37,9 @@ source "${CONFIG_ENV}"
 # Normal installs always write all fields via install.sh.
 GH_ORG="${GH_ORG:-your-org}"
 RUNNER_LABELS="${RUNNER_LABELS:-self-hosted,mobile,ios,android}"
+# Display name: install.sh writes the gh-runner-ios-<id>-<n> name into config.env. Fallback to a
+# host+uuid name if unset. Fixed per machine — re-register each ephemeral cycle with --replace.
+RUNNER_NAME="${RUNNER_NAME:-$(hostname -s)-mobile-$(uuidgen | tr -d - | cut -c1-8)}"
 RUNNER_TOKEN="${RUNNER_TOKEN:-}"
 BROKER_URL="${BROKER_URL:-}"
 # NOTE: unquoted expansion — BROKER_SECRET is sourced from config.env above; the colon-assign
@@ -121,7 +124,7 @@ _acquire_reg_token() {
   # Priority 2: token-broker (Model B — no GitHub credential on this machine).
   # Broker API: POST /token with Authorization: Bearer <BROKER_SECRET>
   # Returns: {"token": "...", "expires_at": "...", "url": "..."}
-  # See: https://github.com/islee/ci-runner-token-broker
+  # See: https://github.com/islee/gh-runners/tree/main/broker
   if [[ -n "${BROKER_URL}" ]]; then
     log "Fetching registration token from broker: $(_mask_url "${BROKER_URL}")"
     REG_TOKEN="$(curl --silent --fail --max-time 15 -X POST \
@@ -200,9 +203,8 @@ while true; do
   _CURRENT_REG_TOKEN="${REG_TOKEN}"
 
   # ------ Register (ephemeral) + run one job -----------------------------
-  # Collision-safe suffix: $RANDOM is only 15-bit; uuidgen gives a process-unique name so two
-  # concurrent machines don't accidentally deregister each other with --replace.
-  RUNNER_NAME="$(hostname -s)-mobile-$(uuidgen | tr -d - | cut -c1-8)"
+  # Fixed name (gh-runner-ios-<id>-<n> from config.env, resolved above). --replace re-claims this
+  # machine's own prior registration each cycle; <id> keeps it distinct from other machines.
   log "Registering runner: ${RUNNER_NAME}"
 
   # WHY: --ephemeral tells the runner to deregister itself after completing exactly one job.

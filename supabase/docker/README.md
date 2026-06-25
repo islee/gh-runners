@@ -30,7 +30,7 @@ image — install it in your workflow (or add it to the `Dockerfile`).
 
 ## Credentials
 Set one in `.env` (priority high → low): `RUNNER_TOKEN` (static, ~1h) → `BROKER_URL`+`BROKER_SECRET`
-([broker](https://github.com/islee/ci-runner-token-broker), recommended) → `ACCESS_TOKEN` (fine-grained
+([broker](https://github.com/islee/gh-runners/tree/main/broker), recommended) → `ACCESS_TOKEN` (fine-grained
 PAT, `organization_self_hosted_runners` only — never admin).
 
 ## Cleanup

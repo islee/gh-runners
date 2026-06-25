@@ -1,0 +1,23 @@
+# Render Blueprint for the token broker (lives in broker/).
+# Deploy: Render → New → Blueprint → point at this repo. Runtime is **docker**: Render builds
+# broker/Dockerfile (rootDir scopes the build context to broker/). The image's CMD runs uvicorn on
+# $PORT, which Render injects.
+services:
+  - type: web
+    name: gh-runner-broker
+    runtime: docker
+    rootDir: broker          # build context = this repo's broker/ subdir
+    dockerfilePath: ./Dockerfile   # relative to rootDir
+    plan: starter            # free tier sleeps after ~15 min → cold-start on the next token fetch
+    healthCheckPath: /health
+    envVars:
+      - key: GH_ORG
+        sync: false          # your GitHub org login; set in the Render dashboard
+      - key: GH_APP_ID
+        sync: false          # set in the Render dashboard
+      - key: GH_INSTALLATION_ID
+        sync: false
+      - key: GH_APP_PRIVATE_KEY
+        sync: false          # paste the App .pem contents (multi-line ok), OR use a Secret File
+      - key: BROKER_SECRET
+        generateValue: true  # Render generates a strong shared secret; copy it into runner .env

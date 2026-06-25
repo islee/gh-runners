@@ -1,0 +1,7 @@
+[tool.pytest.ini_options]
+# app.py lives at the repo root; put it on sys.path so `from app import app` resolves.
+pythonpath = ["."]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100

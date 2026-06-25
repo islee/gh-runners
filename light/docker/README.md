@@ -23,7 +23,7 @@ Set exactly one in `.env` (priority high → low):
 | Model | Var(s) | Notes |
 |-------|--------|-------|
 | **A — static** | `RUNNER_TOKEN` | One-off; expires ~1h. |
-| **B — broker** | `BROKER_URL` + `BROKER_SECRET` | Recommended. No GitHub credential in the container; the [token-broker](https://github.com/islee/ci-runner-token-broker) mints fresh tokens. |
+| **B — broker** | `BROKER_URL` + `BROKER_SECRET` | Recommended. No GitHub credential in the container; the [token-broker](https://github.com/islee/gh-runners/tree/main/broker) mints fresh tokens. |
 | **PAT** | `ACCESS_TOKEN` | Fine-grained PAT, `organization_self_hosted_runners` scope only — never an admin PAT. |
 
 ## Notes

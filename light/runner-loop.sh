@@ -23,6 +23,9 @@ source "${CONFIG_ENV}"
 # ── Defaults / derived ─────────────────────────────────────────────────────────
 GH_ORG="${GH_ORG:-your-org}"
 RUNNER_LABELS="${RUNNER_LABELS:-self-hosted,linux,x64,light}"
+# Display name: install.sh writes the gh-runner-<type>-<id>-<n> name into config.env. If absent
+# (hand-rolled config), fall back to a host+uuid name. Fixed per instance — re-register with --replace.
+RUNNER_NAME="${RUNNER_NAME:-$(hostname -s)-$(uuidgen | tr -d - | cut -c1-8)}"
 RUNNER_TOKEN="${RUNNER_TOKEN:-}"
 BROKER_URL="${BROKER_URL:-}"
 ACCESS_TOKEN="${ACCESS_TOKEN:-}"
@@ -131,9 +134,8 @@ while true; do
   RETRY_ATTEMPT=0
   _CURRENT_REG_TOKEN="${REG_TOKEN}"
 
-  # Collision-safe unique name. $RANDOM is only 15-bit; combined with --replace a name collision
-  # would DEREGISTER another runner mid-job. uuidgen gives a process-unique suffix.
-  RUNNER_NAME="$(hostname -s)-$(uuidgen | tr -d - | cut -c1-8)"
+  # Fixed per-instance name (gh-runner-<type>-<id>-<n> from config.env). --replace re-claims this
+  # instance's own prior registration each ephemeral cycle; the <id>+<n> keep it unique across hosts.
   log "Registering runner: ${RUNNER_NAME}"
 
   # --ephemeral: deregister after exactly one job. --replace: clear a stale same-name registration.

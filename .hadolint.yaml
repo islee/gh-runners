@@ -13,3 +13,6 @@ ignored:
   # SC1091 — embedded shellcheck "can't follow sourced file" for `. /etc/os-release` in a RUN; the
   # file only exists at build time, not for the linter.
   - SC1091
+  # DL3025 — "use JSON notation for CMD". broker/Dockerfile uses shell-form CMD on purpose so $PORT
+  # expands at runtime (the JSON exec form would treat ${PORT} literally).
+  - DL3025

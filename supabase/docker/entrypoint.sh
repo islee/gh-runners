@@ -16,7 +16,7 @@ set -euo pipefail
 # TODO: verify on first build — `docker run --rm ghcr.io/actions/actions-runner ls /home/runner`.
 RUNNER_HOME="${RUNNER_HOME:-/home/runner}"
 GH_ORG="${GH_ORG:-your-org}"                                  # set in .env
-RUNNER_NAME="${RUNNER_NAME:-ci-runner-$(hostname)}"          # hostname adds uniqueness when scaling
+RUNNER_NAME="${RUNNER_NAME:-gh-runner-supabase-${OWNER:-$(hostname -s)}-${RUNNER_NUMBER:-1}}"  # gh-runner-<type>-<id>-<n>
 RUNNER_LABELS="${RUNNER_LABELS:-self-hosted,linux,x64,supabase}"
 # Runner work dir. Default `_work` is the runner's own default (fine for plain jobs). For a
 # docker-in-job runner (e.g. supabase) this is bind-mounted at the SAME absolute path host↔container

@@ -52,7 +52,7 @@ Supply exactly one (priority high → low):
 | Model | Flag(s) | Use when |
 |-------|---------|----------|
 | **A — static** | `--token` | One-off/pilot. Expires ~1h, so it survives only the first registration. |
-| **B — broker** | `--broker-url` + `--broker-secret` | Recommended. No GitHub credential on the host; the [token-broker](https://github.com/islee/ci-runner-token-broker) mints fresh tokens. |
+| **B — broker** | `--broker-url` + `--broker-secret` | Recommended. No GitHub credential on the host; the [token-broker](https://github.com/islee/gh-runners/tree/main/broker) mints fresh tokens. |
 | **PAT** | `--access-token` | Unattended without a broker. Fine-grained PAT, `organization_self_hosted_runners` scope only — **never an admin PAT**. |
 
 ## Operate

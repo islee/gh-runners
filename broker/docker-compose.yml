@@ -1,0 +1,30 @@
+# Docker deployment of the token broker — for self-hosting it on any container host instead of Render.
+#
+# Setup:
+#   cp env.example .env        # set GH_APP_ID / GH_INSTALLATION_ID / GH_ORG / BROKER_SECRET
+#   # provide the GitHub App private key one of two ways:
+#   #   (a) inline: set GH_APP_PRIVATE_KEY in .env, or
+#   #   (b) file:   put the .pem next to this file and uncomment the volume + GH_APP_PRIVATE_KEY_PATH below
+#   docker compose up -d --build
+#
+# Put it behind a TLS-terminating reverse proxy — the BROKER_SECRET is a bearer token; never expose
+# the broker over plain HTTP.
+
+services:
+  broker:
+    build: .
+    env_file: .env
+    environment:
+      PORT: 8000
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+    # Secret-File style key (preferred over inline GH_APP_PRIVATE_KEY):
+    # set GH_APP_PRIVATE_KEY_PATH=/etc/secrets/app-private-key.pem in .env and uncomment:
+    # volumes:
+    #   - ./app-private-key.pem:/etc/secrets/app-private-key.pem:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health').getcode()==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3

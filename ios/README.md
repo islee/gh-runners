@@ -175,7 +175,7 @@ Model B (broker) is the recommended approach for fleets because no GitHub creden
 lives on the runner Mac. The broker mints short-lived registration tokens on demand.
 
 The companion broker service is published at:
-**https://github.com/islee/ci-runner-token-broker**
+**https://github.com/islee/gh-runners/tree/main/broker**
 
 Broker API (used by `runner-loop.sh` and `uninstall.sh`):
 

@@ -1,11 +1,17 @@
 # Credentials & runner state — NEVER commit.
-# The only committed config is the *.example templates (which end in .example, not .env).
-.env
+# Rule: everything starting with `.env` is ignored EXCEPT `.env*.example` templates.
+.env*
+!.env*.example
+# Other credential-bearing runner config (no leading dot; *.example stays committed).
 *.env
 config.env
 *.pem
 *.key
 secrets/
+
+# Host-specific / private deployment compose overlays (e.g. linple) — never in the public repo.
+docker-compose.linple.yml
+docker-compose.*.local.yml
 
 # actions/runner install + working artifacts (if someone installs in-tree)
 actions-runner*/

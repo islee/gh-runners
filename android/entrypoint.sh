@@ -30,9 +30,9 @@ RUNNER_HOME="${RUNNER_HOME:-/home/runner}"
 # Override via GH_ORG environment variable (set in .env / docker-compose.yml).
 GH_ORG="${GH_ORG:-your-org}"  # NOTE: set GH_ORG in your .env file
 
-# Runner display name — shown in org Settings > Actions > Runners.
-# Appending the container hostname adds uniqueness when scaling replicas.
-RUNNER_NAME="${RUNNER_NAME:-android-runner-$(hostname)}"
+# Runner display name — gh-runner-<type>-<id>-<n>. <id>=OWNER (default host), <n>=RUNNER_NUMBER.
+# Override RUNNER_NAME directly (e.g. from compose) when running more than one.
+RUNNER_NAME="${RUNNER_NAME:-gh-runner-android-${OWNER:-$(hostname -s)}-${RUNNER_NUMBER:-1}}"
 
 # Labels that workflows must match to route jobs to this runner.
 RUNNER_LABELS="${RUNNER_LABELS:-self-hosted,mobile,android}"
@@ -44,8 +44,8 @@ RUNNER_LABELS="${RUNNER_LABELS:-self-hosted,mobile,android}"
 #   Expires ~1 h after minting. Good for single-run pilots; ephemeral re-registration will fail
 #   after expiry, so the container will fail to restart. Use model B or ACCESS_TOKEN for production.
 #
-# Model B — BROKER_URL + BROKER_SECRET: a deployed ci-runner-token-broker instance
-#   (https://github.com/islee/ci-runner-token-broker) holds the GitHub App credential.
+# Model B — BROKER_URL + BROKER_SECRET: a deployed gh-runner-broker instance
+#   (https://github.com/islee/gh-runners/tree/main/broker) holds the GitHub App credential.
 #   This container POSTs to $BROKER_URL/token and gets a fresh token each cycle.
 #   No GitHub credential ever lives in this container — only the broker secret.
 #

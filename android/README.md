@@ -137,7 +137,7 @@ then immediately kill it — reducing idle RAM to the runner agent alone (~100 M
 | Model | Variables | When to use |
 |-------|-----------|-------------|
 | **A** | `RUNNER_TOKEN` | Short-lived org registration token. Good for a single pilot run. Expires ~1 h after minting — unattended containers will stop re-registering after expiry. |
-| **B** | `BROKER_URL` + `BROKER_SECRET` | Recommended for fleets. Deploy [ci-runner-token-broker](https://github.com/islee/ci-runner-token-broker); broker holds the GitHub App credential and issues fresh tokens. No GitHub credential in this container. |
+| **B** | `BROKER_URL` + `BROKER_SECRET` | Recommended for fleets. Deploy [gh-runner-broker](https://github.com/islee/gh-runners/tree/main/broker); broker holds the GitHub App credential and issues fresh tokens. No GitHub credential in this container. |
 | **C** | `ACCESS_TOKEN` | Fine-grained PAT scoped to `organization_self_hosted_runners` only. Entrypoint mints a fresh registration token each cycle. CRITICAL: never use an org admin PAT. |
 
 Set exactly one. Priority is A → B → C.
