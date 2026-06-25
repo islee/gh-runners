@@ -67,32 +67,73 @@ callers get `429` with a `Retry-After` header. Behind Render the client IP is re
 
 ## Recent stats
 
-`GET /stats` (auth-gated, rate-limited) reports **recent token activity** so you can see which runner
-types and hosts have been active without standing up any datastore. Every `/token` / `/remove-token`
-call carries the runner's `X-Runner-Name` (`gh-runner-<type>-<id>-<n>`), which the broker parses into
-`type` + `host` and records in a time-windowed, in-process ring buffer.
+`GET /stats` (auth-gated, rate-limited) returns two top-level fields:
+
+| Field | Source | Durability |
+|-------|--------|------------|
+| `fleet` | Live GitHub API query — current runner state (online/busy/labels) | Durable by construction (GitHub is the source of truth) |
+| `activity` | Token/remove-token call counts per type and host | Durable when Upstash or Supabase is configured; in-memory window otherwise |
 
 ```bash
 curl -fsS -H "Authorization: Bearer $BROKER_SECRET" https://<service>/stats | jq .
 ```
 ```jsonc
 {
-  "window_seconds": 86400,
   "generated_at": "2026-06-25T08:47:59Z",
-  "total_events": 42,
-  "totals": { "token": 40, "remove-token": 2 },
-  "by_type": { "light": { "token": 28, "remove-token": 0, "runners": 2, "last_seen": "…" }, … },
-  "by_host": { "ci-linple": { "token": 40, "remove-token": 2, "runners": 4, "last_seen": "…" } },
-  "runners": [ { "name": "gh-runner-light-ci-linple-1", "type": "light", "host": "ci-linple",
-                 "token": 14, "remove-token": 0, "last_seen": "…" }, … ]
+  "fleet": {
+    "total": 4, "online": 3, "busy": 1,
+    "by_type": { "light": { "total": 2, "online": 2, "busy": 0 }, … },
+    "by_host": { "ci-linple": { "total": 4, "online": 3, "busy": 1 } },
+    "runners": [
+      { "name": "gh-runner-light-ci-linple-1", "type": "light", "host": "ci-linple",
+        "status": "online", "busy": false, "labels": ["self-hosted","light"] }, … ]
+  },
+  "activity": {
+    "backend": "upstash-redis",
+    "durable": true,
+    "since": "2026-06-01T00:00:00Z",
+    "totals": { "token": 40, "remove-token": 2 },
+    "by_type": { "light": { "token": 28, "remove-token": 0, "last_seen": "…" }, … },
+    "by_host": { "ci-linple": { "token": 40, "remove-token": 2, "last_seen": "…" } }
+  }
 }
 ```
 
-- **In-process & windowed** — state resets on restart / Render cold start; it's *recent activity*, not
-  durable accounting. Window = `RUNNER_STATS_WINDOW_SECONDS` (default `86400` = 24 h); the buffer is
-  capped at `RUNNER_STATS_MAX_EVENTS` (default `10000`) as a memory backstop.
-- **Auth-gated** because it exposes fleet topology (types, hosts, runner names). A name that doesn't
-  fit `gh-runner-<type>-<id>-<n>` is bucketed as type `unknown`.
+**Fleet field** — populated by `GET /orgs/{org}/actions/runners` (paginated) using the cached
+installation token. A GitHub error produces `{"error": "…"}` without blocking the `activity` field.
+
+### Activity backends
+
+Select via `STATS_BACKEND` (default `auto`). All persistence is fire-and-forget (best-effort) — the
+hot path is never blocked. `record()` implementations swallow errors and log warnings.
+
+| `STATS_BACKEND` | `backend` in response | `durable` | Requires |
+|---|---|---|---|
+| `auto` (default) | Upstash → Supabase → memory (first configured wins) | varies | see below |
+| `upstash` | `upstash-redis` | `true` | `UPSTASH_REDIS_REST_URL` + `UPSTASH_REDIS_REST_TOKEN` |
+| `supabase` | `supabase` | `true` | (`SUPABASE_SECRET_KEY` or `SUPABASE_SERVICE_KEY`) + (`SUPABASE_URL` or `SUPABASE_PROJECT_REF`) |
+| `memory` | `memory` | `false` | — (always available) |
+
+**Auto precedence:** Upstash is preferred when both Upstash and Supabase credentials are present.
+If neither is configured, in-memory is used automatically — the broker never fails to boot.
+
+**Upstash Redis:** Set `UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN`. Counters survive
+restarts and Render cold starts. The `since` field marks the first ever recorded event.
+
+**Supabase Postgres:** Set either `SUPABASE_SECRET_KEY` (new-style `sb_secret_...` key, preferred)
+or `SUPABASE_SERVICE_KEY` (legacy `service_role` JWT; still works). Both use the same
+`apikey`/`Authorization` headers — only the env-var name differs. Also set `SUPABASE_URL` (full URL)
+or `SUPABASE_PROJECT_REF` (project ref; URL derived as `https://<ref>.supabase.co`). Never use the
+publishable key (`sb_publishable_...`) here — it is RLS-restricted and will fail. **One-time
+setup:** run `broker/supabase_stats.sql` in the Supabase SQL editor to create `runner_stats`,
+`runner_stats_meta`, and the `record_runner_event` upsert RPC.
+
+**In-memory fallback:** `backend: "memory"`, `durable: false`. Resets on restart.
+Window = `RUNNER_STATS_WINDOW_SECONDS` (default 24 h); ring-buffer cap = `RUNNER_STATS_MAX_EVENTS`
+(default 10000).
+
+**Auth-gated** because it exposes fleet topology (types, hosts, runner names). A runner name that
+doesn't fit `gh-runner-<type>-<id>-<n>` is bucketed as type `unknown`.
 
 ## Credentials & security
 
