@@ -1,6 +1,6 @@
 # Container image for the gh-runner-broker. The repo-root render.yaml deploys this on Render
 # (runtime: docker, rootDir: broker); docker-compose.yml runs it on any other container host.
-FROM python:3.12-slim
+FROM python:3.14-slim
 
 WORKDIR /app
 COPY requirements.txt .
