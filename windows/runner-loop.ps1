@@ -215,6 +215,13 @@ try {
             $script:CurrentRegToken = ''
             # CRITICAL: clear token from memory before sleeping; config.cmd did not consume it.
             $regTok = ''
+            # WHY: config.cmd fails with "already configured" when stale local registration files
+            # (.runner, .credentials, .credentials_rsaparams) remain from a prior cycle or reinstall.
+            # Clearing them self-heals the loop. A prior registration may linger OFFLINE in GitHub
+            # until pruned or the next --replace cycle reclaims the name.
+            foreach ($regFile in @('.runner', '.credentials', '.credentials_rsaparams')) {
+                Remove-Item -Path (Join-Path $ScriptDir $regFile) -Force -ErrorAction SilentlyContinue
+            }
             Start-Sleep -Seconds $RegistrationRetrySeconds
             continue
         }

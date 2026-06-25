@@ -205,6 +205,15 @@ for ($i = 1; $i -le $Count; $i++) {
     Write-Info "Expanding runner archive into $InstDir..."
     Expand-Archive -Path $TmpZip -DestinationPath $InstDir -Force
 
+    # WHY: config.cmd refuses to register ("already configured") if stale local registration files
+    # (.runner, .credentials, .credentials_rsaparams) from a previous install exist in the instance
+    # dir. Clearing them makes reinstall idempotent. Safe because every cycle re-registers fresh
+    # with --replace/--ephemeral; a prior entry may linger OFFLINE in GitHub until GitHub prunes it.
+    foreach ($regFile in @('.runner', '.credentials', '.credentials_rsaparams')) {
+        Remove-Item -Path (Join-Path $InstDir $regFile) -Force -ErrorAction SilentlyContinue
+    }
+    Write-Info "Cleared any stale local runner registration files in $InstDir (idempotent reinstall)."
+
     # config.env — create BEFORE writing any credential (no world-readable window).
     $ConfigEnv = Join-Path $InstDir 'config.env'
     $RunnerName = "gh-runner-$RunnerType-$Owner-$i"

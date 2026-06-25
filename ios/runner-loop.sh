@@ -220,6 +220,10 @@ while true; do
     --name "${RUNNER_NAME}"; then
     warn "config.sh failed — will retry in ${REGISTRATION_RETRY_SECONDS}s."
     _CURRENT_REG_TOKEN=""
+    # WHY: config.sh fails with "already configured" when stale local registration files (.runner,
+    # .credentials*) remain from a prior cycle or reinstall. Clearing them here self-heals the loop
+    # without operator intervention. A prior registration may linger OFFLINE in GitHub until pruned.
+    rm -f "${RUNNER_DIR}/.runner" "${RUNNER_DIR}/.credentials" "${RUNNER_DIR}/.credentials_rsaparams" || true
     sleep "${REGISTRATION_RETRY_SECONDS}"
     continue
   fi
