@@ -13,6 +13,9 @@ secrets/
 docker-compose.linple.yml
 docker-compose.*.local.yml
 
+# Claude Code context files — keep local, never publish (matches CLAUDE.md at any depth).
+CLAUDE.md
+
 # actions/runner install + working artifacts (if someone installs in-tree)
 actions-runner*/
 _work/
