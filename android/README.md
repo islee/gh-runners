@@ -165,7 +165,7 @@ Controlled via `.env`:
 
 | Variable | Default | Notes |
 |----------|---------|-------|
-| `RUNNER_CPUS` | `4` | Adjust based on your machine's core count. Leave ≥2 for the host OS. |
+| `RUNNER_CPUS` | `4` | Adjust to the host's core count. Leave ≥2 for the host OS. |
 | `RUNNER_MEM` | `6g` | Floor: ~2 GB emulator + ~2 GB app under test + runner/Maestro overhead. 8 GB comfortable. |
 | `KVM_GID` | `kvm` (name) | Numeric GID of the host `kvm` group (`getent group kvm`). Numeric is more reliable than name. |
 

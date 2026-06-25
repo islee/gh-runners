@@ -32,16 +32,18 @@ This directory is self-contained — copy it to any Mac and run `install.sh`.
 
 ## Onboarding
 
-### Step 1 — Get a credential (ask the operator)
+### Step 1 — Get a credential
 
-| Model | What you receive | Notes |
-|-------|-----------------|-------|
-| **A — static token** | A one-off `RUNNER_TOKEN` minted for your machine | Expires ~1h; survives only the first registration cycle |
-| **B — broker** | A `BROKER_URL` + `BROKER_SECRET` pointing at a token-broker instance | No GitHub credential on your machine; the broker holds the GitHub App key |
+Supply exactly one (priority high → low):
+
+| Model | Credential | Notes |
+|-------|-----------|-------|
+| **A — static token** | A one-off `RUNNER_TOKEN` | Expires ~1h; survives only the first registration cycle |
+| **B — broker** | A `BROKER_URL` + `BROKER_SECRET` pointing at a token-broker instance | No GitHub credential on the host; the broker holds the GitHub App key |
 | **C — PAT** | An `ACCESS_TOKEN` scoped to `organization_self_hosted_runners` | Loop mints fresh tokens via the GitHub REST API each cycle |
 
-**Never use the org admin PAT.** The credential you receive must only be able to
-manage runners — not read code, write issues, or access repository secrets.
+**Never use the org admin PAT.** The credential must only be able to manage runners — not read
+code, write issues, or access repository secrets.
 
 ### Step 2 — Copy and run the installer
 
@@ -117,7 +119,7 @@ tail -f ~/Library/Logs/gh-runner.out.log
 
 By default the runner **skips job cycles when on battery** — it checks
 `pmset -g batt` each loop iteration and sleeps 60 s before trying again.
-This prevents draining your battery during standup or when off-site.
+This avoids draining the battery on a laptop that isn't plugged in.
 
 To allow the runner to work on battery (e.g. Mac mini, always plugged in):
 
@@ -156,20 +158,17 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.example.gh-runner.pl
 
 ## Security
 
-**You are running CI job code on your personal machine.** The design limits blast radius:
+This runner executes CI job code on the host Mac. Blast radius is bounded by:
 
-1. **No untrusted fork PRs.** E2E jobs should only trigger on nightly `main`-branch runs
-   or when a maintainer manually applies a trusted label to a PR.
-   Do not expose the `pull_request` event for external forks to this runner.
-2. **Ephemeral runners.** The runner deregisters after every job; no state (tokens,
-   env, workspace) bleeds between jobs.
-3. **Least-privilege credential.** Your token must only be able to manage runners — not
-   read code, write issues, or access repository secrets.
-4. **Battery + nice guard.** The runner process is niced (lower scheduling priority)
-   and will not start jobs when you are on battery (unless `ALLOW_BATTERY=1`).
+1. **No untrusted fork PRs.** E2E jobs should trigger only on nightly `main`-branch runs or a
+   maintainer-applied label — never automatically on `pull_request` from external forks.
+2. **Ephemeral.** The runner deregisters after every job; no state (tokens, env, workspace) persists.
+3. **Least-privilege credential.** The credential can only manage runners — not read code or secrets.
+   Use model B or a scoped PAT; never an admin PAT.
+4. **Battery + nice guard.** The runner is niced (lower priority) and skips jobs on battery
+   (unless `ALLOW_BATTERY=1`).
 
-If you ever feel uncomfortable with a job that ran, revoke your credential immediately
-and notify the operator.
+If a job looks suspicious, rotate the credential immediately.
 
 ---
 
