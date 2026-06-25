@@ -35,7 +35,8 @@ sudo ./install.sh --org your-org --token <REG_TOKEN> --user ci --count 1
 
 `install.sh` downloads `actions/runner`, sets up `--count` instance dirs under `--runner-base`
 (default `/opt/gh-runner-light/<i>`), writes each a `config.env` (mode 600), installs the
-`gh-runner@.service` systemd template, and enables `gh-runner@1 .. gh-runner@N`.
+`gh-runner@.service` template as `gh-runner-light@.service` (per-type name prevents collision when
+light and supabase runners share a host), and enables `gh-runner-light@1 .. gh-runner-light@N`.
 
 | Flag | Default | Notes |
 |------|---------|-------|
@@ -61,10 +62,10 @@ Supply exactly one (priority high → low):
 
 ## Operate
 ```bash
-systemctl status 'gh-runner@*'        # all instances
-journalctl -u 'gh-runner@1' -f        # follow instance 1
-systemctl disable --now gh-runner@1   # take instance 1 offline (deregisters via SIGTERM trap)
-systemctl enable  --now gh-runner@1   # bring it back
+systemctl status 'gh-runner-light@*'        # all instances
+journalctl -u 'gh-runner-light@1' -f        # follow instance 1
+systemctl disable --now gh-runner-light@1   # take instance 1 offline (deregisters via SIGTERM trap)
+systemctl enable  --now gh-runner-light@1   # bring it back
 ```
 
 ## Uninstall
