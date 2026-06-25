@@ -2,7 +2,7 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <!--
-  com.example.ci-runner.plist — LaunchAgent for the iOS/Android-on-Mac self-hosted runner.
+  com.example.gh-runner.plist — LaunchAgent for the iOS/Android-on-Mac self-hosted runner.
 
   IMPORTANT: This file is a TEMPLATE. install.sh performs two sed substitutions before
   writing to ~/Library/LaunchAgents/:
@@ -13,14 +13,14 @@
   Do not load this template directly; always go through install.sh.
 
   NOTE: customize the Label below to match your team's reverse-DNS domain
-  (e.g. com.acme.ci-runner) if deploying multiple runners on the same machine.
+  (e.g. com.acme.gh-runner) if deploying multiple runners on the same machine.
 
   KeepAlive=true causes launchd to restart runner-loop.sh if it exits unexpectedly.
   runner-loop.sh itself loops forever; a clean exit only happens via uninstall.sh.
 -->
 <dict>
   <key>Label</key>
-  <string>com.example.ci-runner</string>
+  <string>com.example.gh-runner</string>
 
   <key>ProgramArguments</key>
   <array>
@@ -49,12 +49,12 @@
   <string>__RUNNER_DIR__</string>
 
   <!-- NOTE: stdout and stderr go to separate files for unambiguous log tailing.
-       'tail -f ~/Library/Logs/ci-runner.out.log' to follow runner output. -->
+       'tail -f ~/Library/Logs/gh-runner.out.log' to follow runner output. -->
   <key>StandardOutPath</key>
-  <string>__LOG_DIR__/ci-runner.out.log</string>
+  <string>__LOG_DIR__/gh-runner.out.log</string>
 
   <key>StandardErrorPath</key>
-  <string>__LOG_DIR__/ci-runner.err.log</string>
+  <string>__LOG_DIR__/gh-runner.err.log</string>
 
 </dict>
 </plist>

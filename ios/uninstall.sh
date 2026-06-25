@@ -16,7 +16,7 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 
 readonly DEFAULT_RUNNER_DIR="${HOME}/actions-runner-e2e"
-readonly PLIST_LABEL="com.example.ci-runner"
+readonly PLIST_LABEL="com.example.gh-runner"
 readonly PLIST_DST="${HOME}/Library/LaunchAgents/${PLIST_LABEL}.plist"
 
 RUNNER_DIR="${RUNNER_DIR:-${DEFAULT_RUNNER_DIR}}"

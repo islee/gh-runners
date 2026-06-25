@@ -1,5 +1,5 @@
-# Portable image for the gh-runner-broker (Render can use this, or any container host).
-# Render's native Python runtime (render.yaml) doesn't need this; it's here for non-Render hosting.
+# Container image for the gh-runner-broker. The repo-root render.yaml deploys this on Render
+# (runtime: docker, rootDir: broker); docker-compose.yml runs it on any other container host.
 FROM python:3.12-slim
 
 WORKDIR /app

@@ -14,7 +14,7 @@
 #   1. --token / RUNNER_TOKEN         Model A: static registration token (onboarding, one-off)
 #   2. --broker-url / BROKER_URL      Model B: token-broker URL (recommended at scale)
 #      --broker-secret / BROKER_SECRET  Bearer secret for the broker API
-#   3. --access-token / ACCESS_TOKEN  Fine-grained PAT with organization_self_hosted_runners scope
+#   3. --access-token / ACCESS_TOKEN  Model C: fine-grained PAT with organization_self_hosted_runners scope
 #      WHY: runner-loop mints fresh registration tokens each cycle via the GitHub REST API.
 #      This must NOT be an org admin PAT — use a scoped fine-grained PAT.
 
@@ -33,10 +33,10 @@ readonly DEFAULT_RUNNER_VERSION="2.335.1"
 readonly DEFAULT_ORG="your-org"
 readonly DEFAULT_LABELS="self-hosted,mobile,ios,android"
 readonly DEFAULT_RUNNER_DIR="${HOME}/actions-runner-e2e"
-# NOTE: com.example.ci-runner follows reverse-DNS convention. Customize this label to match your
-# team's domain (e.g. com.acme.ci-runner) before deploying at scale — it uniquely identifies the
+# NOTE: com.example.gh-runner follows reverse-DNS convention. Customize this label to match your
+# team's domain (e.g. com.acme.gh-runner) before deploying at scale — it uniquely identifies the
 # LaunchAgent in launchd and must not collide with other LaunchAgents on the same machine.
-readonly PLIST_LABEL="com.example.ci-runner"
+readonly PLIST_LABEL="com.example.gh-runner"
 readonly PLIST_NAME="${PLIST_LABEL}.plist"
 PLIST_SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/${PLIST_NAME}"
 readonly PLIST_SRC
@@ -138,7 +138,7 @@ fi
 if [[ -z "${ANDROID_HOME:-}" ]]; then
   warn "ANDROID_HOME is unset — Android-on-Mac E2E will not work."
   warn "  -> Install Android SDK (cmdline-tools) and set ANDROID_HOME."
-  warn "  -> Create an arm64-v8a AVD: avdmanager create avd -n ci-runner-arm64 -k 'system-images;android-34;google_apis;arm64-v8a'"
+  warn "  -> Create an arm64-v8a AVD: avdmanager create avd -n gh-runner-arm64 -k 'system-images;android-34;google_apis;arm64-v8a'"
 fi
 
 info "Platform preflight done (warnings above are non-fatal)."
@@ -277,7 +277,7 @@ echo "==========================================================="
 echo ""
 echo " Runner dir : ${RUNNER_DIR}"
 echo " Config     : ${RUNNER_DIR}/config.env  (chmod 600)"
-echo " Logs       : ${LOG_DIR}/ci-runner.{out,err}.log"
+echo " Logs       : ${LOG_DIR}/gh-runner.{out,err}.log"
 echo ""
 echo " The runner is now running via launchd and will start on"
 echo " login. It registers fresh with GitHub for each job."

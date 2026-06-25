@@ -34,8 +34,8 @@ sudo ./install.sh --org your-org --token <REG_TOKEN> --user ci --count 1
 ```
 
 `install.sh` downloads `actions/runner`, sets up `--count` instance dirs under `--runner-base`
-(default `/opt/ci-runner-light/<i>`), writes each a `config.env` (mode 600), installs the
-`ci-runner@.service` systemd template, and enables `ci-runner@1 .. ci-runner@N`.
+(default `/opt/gh-runner-light/<i>`), writes each a `config.env` (mode 600), installs the
+`gh-runner@.service` systemd template, and enables `gh-runner@1 .. gh-runner@N`.
 
 | Flag | Default | Notes |
 |------|---------|-------|
@@ -43,8 +43,12 @@ sudo ./install.sh --org your-org --token <REG_TOKEN> --user ci --count 1
 | `--labels` | `self-hosted,linux,x64,light` | Must match the workflow's `runs-on:` |
 | `--count` | `2` | Number of concurrent runner instances |
 | `--user` | invoking sudo user | Non-root user the runners run as |
-| `--runner-base` | `/opt/ci-runner-light` | Parent dir; instance `i` lives at `<base>/<i>` |
+| `--owner` | host short name | `<id>` in the runner name `gh-runner-light-<id>-<n>` (use a username on a shared fleet) |
+| `--runner-base` | `/opt/gh-runner-light` | Parent dir; instance `i` lives at `<base>/<i>` |
 | `--runner-version` | pinned | Bump when GitHub rejects the pinned version |
+
+> **Runner names:** each instance registers as `gh-runner-light-<owner>-<i>` (the
+> `gh-runner-<type>-<id>-<n>` convention) — fixed per instance, re-registered each cycle with `--replace`.
 
 ## Credentials
 Supply exactly one (priority high → low):
@@ -53,20 +57,20 @@ Supply exactly one (priority high → low):
 |-------|---------|----------|
 | **A — static** | `--token` | One-off/pilot. Expires ~1h, so it survives only the first registration. |
 | **B — broker** | `--broker-url` + `--broker-secret` | Recommended. No GitHub credential on the host; the [token-broker](https://github.com/islee/gh-runners/tree/main/broker) mints fresh tokens. |
-| **PAT** | `--access-token` | Unattended without a broker. Fine-grained PAT, `organization_self_hosted_runners` scope only — **never an admin PAT**. |
+| **C — PAT** | `--access-token` | Unattended without a broker. Fine-grained PAT, `organization_self_hosted_runners` scope only — **never an admin PAT**. |
 
 ## Operate
 ```bash
-systemctl status 'ci-runner@*'        # all instances
-journalctl -u 'ci-runner@1' -f        # follow instance 1
-systemctl disable --now ci-runner@1   # take instance 1 offline (deregisters via SIGTERM trap)
-systemctl enable  --now ci-runner@1   # bring it back
+systemctl status 'gh-runner@*'        # all instances
+journalctl -u 'gh-runner@1' -f        # follow instance 1
+systemctl disable --now gh-runner@1   # take instance 1 offline (deregisters via SIGTERM trap)
+systemctl enable  --now gh-runner@1   # bring it back
 ```
 
 ## Uninstall
 ```bash
-sudo ./uninstall.sh --count 2 --runner-base /opt/ci-runner-light          # keep dirs
-sudo ./uninstall.sh --count 2 --runner-base /opt/ci-runner-light --purge  # delete dirs
+sudo ./uninstall.sh --count 2 --runner-base /opt/gh-runner-light          # keep dirs
+sudo ./uninstall.sh --count 2 --runner-base /opt/gh-runner-light --purge  # delete dirs
 ```
 
 ## Security

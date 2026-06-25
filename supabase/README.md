@@ -45,9 +45,13 @@ sudo ./install.sh --org your-org --access-token github_pat_xxx --user ci
 ```
 
 `install.sh` downloads `actions/runner`, sets up the instance dir under `--runner-base` (default
-`/opt/ci-runner-supabase/<i>`), writes `config.env` (mode 600), installs the `ci-runner@.service`
-systemd template, and enables `ci-runner@1 .. ci-runner@N`. Flags are identical to
-[`../light`](../light/README.md) (the only different defaults are labels, `--count 1`, and the base dir).
+`/opt/gh-runner-supabase/<i>`), writes `config.env` (mode 600), installs the `gh-runner@.service`
+systemd template, and enables `gh-runner@1 .. gh-runner@N`. Flags are identical to
+[`../light`](../light/README.md) (incl. `--owner`; the only different defaults are labels, `--count 1`,
+and the base dir).
+
+> **Runner name:** registers as `gh-runner-supabase-<owner>-<i>` (`<owner>` from `--owner`, default the
+> host short name).
 
 ## Credentials
 Supply exactly one (priority high → low):
@@ -56,7 +60,7 @@ Supply exactly one (priority high → low):
 |-------|---------|----------|
 | **A — static** | `--token` | One-off/pilot. Expires ~1h. |
 | **B — broker** | `--broker-url` + `--broker-secret` | Recommended. No GitHub credential on the host; the [token-broker](https://github.com/islee/gh-runners/tree/main/broker) mints fresh tokens. |
-| **PAT** | `--access-token` | Unattended without a broker. Fine-grained PAT, `organization_self_hosted_runners` scope only — **never an admin PAT**. |
+| **C — PAT** | `--access-token` | Unattended without a broker. Fine-grained PAT, `organization_self_hosted_runners` scope only — **never an admin PAT**. |
 
 ## Leftover cleanup (important)
 Because the runner is ephemeral but **Docker state lives on the host**, a job that doesn't tear down
@@ -74,15 +78,15 @@ hosted runners — it's the *running* stacks you must clean, not the image cache
 
 ## Operate
 ```bash
-systemctl status 'ci-runner@*'
-journalctl -u 'ci-runner@1' -f
-systemctl disable --now ci-runner@1   # offline (deregisters via SIGTERM trap)
+systemctl status 'gh-runner@*'
+journalctl -u 'gh-runner@1' -f
+systemctl disable --now gh-runner@1   # offline (deregisters via SIGTERM trap)
 ```
 
 ## Uninstall
 ```bash
-sudo ./uninstall.sh --count 1 --runner-base /opt/ci-runner-supabase           # keep dirs
-sudo ./uninstall.sh --count 1 --runner-base /opt/ci-runner-supabase --purge   # delete dirs
+sudo ./uninstall.sh --count 1 --runner-base /opt/gh-runner-supabase           # keep dirs
+sudo ./uninstall.sh --count 1 --runner-base /opt/gh-runner-supabase --purge   # delete dirs
 ```
 
 ## Security

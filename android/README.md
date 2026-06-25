@@ -47,11 +47,11 @@ Registration is handled by `entrypoint.sh` (no third-party runner base).
 
 ```bash
 # Option A — clone the repo and navigate here
-git clone https://github.com/<your-org>/ci-runners.git
-cd ci-runners/android
+git clone https://github.com/islee/gh-runners.git
+cd gh-runners/android
 
 # Option B — copy just this directory
-scp -r android/ user@host:/path/to/android-runner
+scp -r android/ user@host:/path/to/gh-runner-android
 ```
 
 ### 2. Create `.env` from the template
@@ -93,7 +93,14 @@ docker compose up -d --build
 
 The first build takes 10–20 min (Android SDK download). Within 2–3 min the runner appears in:
 
-> **org Settings → Actions → Runners** — look for `android-runner` with labels `self-hosted mobile android`.
+> **org Settings → Actions → Runners** — look for `gh-runner-android-<id>-1` (the
+> `gh-runner-<type>-<id>-<n>` name, `<id>` defaults to the container hostname) with labels
+> `self-hosted,linux,x64,mobile,android`.
+
+### Runner name
+Registers as **`gh-runner-android-<id>-<n>`** — set `<id>` via `OWNER` and `<n>` via `RUNNER_NUMBER`
+in `docker-compose.yml` (or override `RUNNER_NAME` outright). Defaults: `OWNER`=container hostname,
+`RUNNER_NUMBER`=1.
 
 ### 6. Go offline (availability toggle)
 

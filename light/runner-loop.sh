@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # runner-loop.sh — ephemeral relaunch loop for a vanilla actions/runner on Linux.
 #
-# Driven by systemd (ci-runner@.service). Loops forever:
+# Driven by systemd (gh-runner@.service). Loops forever:
 #   1. Acquire a fresh registration token each cycle (ephemeral runners expire it after one job).
 #   2. Register (--ephemeral) and run exactly one job (run.sh exits after it).
 #   3. Re-register clean. Repeat.
@@ -112,7 +112,7 @@ _acquire_reg_token() {
 
 # ── Main loop ──────────────────────────────────────────────────────────────────
 cd "${RUNNER_DIR}"
-log "ci-runner loop starting. Org=${GH_ORG}, Labels=${RUNNER_LABELS}"
+log "gh-runner loop starting. Org=${GH_ORG}, Labels=${RUNNER_LABELS}"
 
 # nice lowers scheduling priority so a CPU-heavy job doesn't starve the host. Loop runs at normal
 # priority; only the runner child processes are niced.

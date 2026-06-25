@@ -1,8 +1,8 @@
 # Systemd template unit for an ephemeral GitHub Actions runner (vanilla actions/runner).
 #
 # This is a TEMPLATE: install.sh sed-substitutes __RUNNER_BASE__ and __RUN_USER__ and writes the
-# result to /etc/systemd/system/ci-runner@.service, then enables one instance per runner dir
-# (ci-runner@1, ci-runner@2, ...). Each instance %i maps to __RUNNER_BASE__/%i, which holds its own
+# result to /etc/systemd/system/gh-runner@.service, then enables one instance per runner dir
+# (gh-runner@1, gh-runner@2, ...). Each instance %i maps to __RUNNER_BASE__/%i, which holds its own
 # actions/runner install + config.env (mode 600) + runner-loop.sh.
 #
 # Do not install this template by hand; run install.sh.

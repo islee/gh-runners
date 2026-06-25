@@ -26,17 +26,18 @@ services:
     # copy env.example → .env and fill in their credentials.
     env_file: .env
 
-    # Runner display name — shown in org Settings > Actions > Runners.
-    # RUNNER_NAME_PREFIX from .env provides the base; hostname adds per-container uniqueness
-    # when you scale replicas on the same host.
-    container_name: ${RUNNER_NAME_PREFIX:-android-runner}
+    # Docker container name (not the GitHub runner name). Count is 1 here, so a fixed name is fine.
+    container_name: gh-runner-android
 
     environment:
-      # Derive runner name from the prefix + container hostname for uniqueness.
-      RUNNER_NAME: "${RUNNER_NAME_PREFIX:-android-runner}-${HOSTNAME:-}"
+      # Runner name follows gh-runner-<type>-<id>-<n>, built in entrypoint.sh. Set <id>/<n> via
+      # OWNER / RUNNER_NUMBER (in .env), or override RUNNER_NAME outright. OWNER defaults to the
+      # container hostname when empty.
+      OWNER: "${OWNER:-}"
+      RUNNER_NUMBER: "${RUNNER_NUMBER:-1}"
       # GH org slug — must match exactly (case-sensitive).
       GH_ORG: "${GH_ORG:-your-org}"
-      RUNNER_LABELS: "${RUNNER_LABELS:-self-hosted,mobile,android}"
+      RUNNER_LABELS: "${RUNNER_LABELS:-self-hosted,linux,x64,mobile,android}"
 
     devices:
       # KVM passthrough — required for hardware-accelerated Android emulation.

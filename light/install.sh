@@ -2,7 +2,7 @@
 # install.sh — set up N ephemeral "light" GitHub Actions runners (vanilla actions/runner + systemd).
 #
 # Installs the official actions/runner into one dir per instance under a base dir, writes each a
-# config.env (mode 600), and registers a systemd template service (ci-runner@1 .. ci-runner@N) that
+# config.env (mode 600), and registers a systemd template service (gh-runner@1 .. gh-runner@N) that
 # runs runner-loop.sh. No Docker, no third-party image.
 #
 # Run with sudo (writes /etc/systemd/system and chowns runner dirs to the run user).
@@ -24,8 +24,8 @@ readonly DEFAULT_ORG="your-org"
 readonly DEFAULT_LABELS="self-hosted,linux,x64,light"
 readonly RUNNER_TYPE="light"   # <type> in the gh-runner-<type>-<id>-<n> name convention
 readonly DEFAULT_COUNT=2
-readonly DEFAULT_RUNNER_BASE="/opt/ci-runner-light"
-readonly SERVICE_NAME="ci-runner@.service"
+readonly DEFAULT_RUNNER_BASE="/opt/gh-runner-light"
+readonly SERVICE_NAME="gh-runner@.service"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; readonly SCRIPT_DIR
 
 GH_ORG="${GH_ORG:-${DEFAULT_ORG}}"
@@ -137,8 +137,8 @@ sed -e "s|__RUNNER_BASE__|${RUNNER_BASE}|g" -e "s|__RUN_USER__|${RUN_USER}|g" \
   "${SCRIPT_DIR}/${SERVICE_NAME}" > "${DEST_UNIT}"
 systemctl daemon-reload
 for i in $(seq 1 "${COUNT}"); do
-  systemctl enable --now "ci-runner@${i}.service"
-  info "Started ci-runner@${i}.service"
+  systemctl enable --now "gh-runner@${i}.service"
+  info "Started gh-runner@${i}.service"
 done
 
 echo ""
@@ -146,8 +146,8 @@ echo "==========================================================="
 echo " light runners installed: ${COUNT} instance(s) under ${RUNNER_BASE}"
 echo " Run user : ${RUN_USER}    Org: ${GH_ORG}    Labels: ${RUNNER_LABELS}"
 echo "==========================================================="
-echo " Status : systemctl status 'ci-runner@*'"
-echo " Logs   : journalctl -u 'ci-runner@1' -f"
-echo " Stop   : systemctl disable --now ci-runner@1   (per instance)"
+echo " Status : systemctl status 'gh-runner@*'"
+echo " Logs   : journalctl -u 'gh-runner@1' -f"
+echo " Stop   : systemctl disable --now gh-runner@1   (per instance)"
 echo " Uninstall: sudo ./uninstall.sh --count ${COUNT} --runner-base ${RUNNER_BASE}"
 echo "==========================================================="

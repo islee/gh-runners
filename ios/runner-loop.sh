@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # runner-loop.sh — ephemeral re-registration loop for the iOS/Android-on-Mac self-hosted runner.
 #
-# Driven by launchd (com.example.ci-runner.plist) and loops forever:
+# Driven by launchd (com.example.gh-runner.plist) and loops forever:
 #   1. Battery guard — skips a cycle if on battery and ALLOW_BATTERY != 1.
 #   2. Mint a fresh registration token each cycle (ephemeral runners expire the token after one job).
 #   3. Register + run one job (--ephemeral -> run.sh exits after one job).

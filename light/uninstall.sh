@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # uninstall.sh — remove the "light" systemd runners installed by install.sh.
 #
-# Stops + disables each ci-runner@<i> instance, removes the systemd template, and optionally purges
+# Stops + disables each gh-runner@<i> instance, removes the systemd template, and optionally purges
 # the runner dirs. Deregistration from GitHub is handled by runner-loop.sh's SIGTERM trap when
 # systemd stops it; if that misses (expired token), remove the runner manually in org settings.
 #
@@ -11,8 +11,8 @@
 set -euo pipefail
 
 readonly DEFAULT_COUNT=2
-readonly DEFAULT_RUNNER_BASE="/opt/ci-runner-light"
-readonly SERVICE_NAME="ci-runner@.service"
+readonly DEFAULT_RUNNER_BASE="/opt/gh-runner-light"
+readonly SERVICE_NAME="gh-runner@.service"
 
 COUNT="${COUNT:-${DEFAULT_COUNT}}"
 RUNNER_BASE="${RUNNER_BASE:-${DEFAULT_RUNNER_BASE}}"
@@ -34,9 +34,9 @@ warn() { echo "[WARN]  $*" >&2; }
 [[ "$(id -u)" -eq 0 ]] || { echo "[ERROR] Run with sudo." >&2; exit 1; }
 
 for i in $(seq 1 "${COUNT}"); do
-  if systemctl list-unit-files "ci-runner@.service" &>/dev/null; then
-    info "Stopping + disabling ci-runner@${i} (SIGTERM lets the loop deregister)..."
-    systemctl disable --now "ci-runner@${i}.service" 2>/dev/null || warn "ci-runner@${i} was not active."
+  if systemctl list-unit-files "gh-runner@.service" &>/dev/null; then
+    info "Stopping + disabling gh-runner@${i} (SIGTERM lets the loop deregister)..."
+    systemctl disable --now "gh-runner@${i}.service" 2>/dev/null || warn "gh-runner@${i} was not active."
   fi
 done
 

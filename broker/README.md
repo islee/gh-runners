@@ -88,7 +88,7 @@ This service is the custodian of a powerful secret. Treat it accordingly.
 
 ## One-time: create the GitHub App
 1. Org (or user) → **Settings → Developer settings → GitHub Apps → New GitHub App**.
-2. Name it (e.g. `ci-runner-broker`); Homepage URL can be anything. **Uncheck "Active"** under Webhook
+2. Name it (e.g. `gh-runner-broker`); Homepage URL can be anything. **Uncheck "Active"** under Webhook
    (no webhook needed).
 3. **Permissions → Organization → Self-hosted runners → Read and write.** Nothing else.
 4. "Where can this be installed" → **Only on this account**. Create.

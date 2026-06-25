@@ -24,9 +24,13 @@ Set exactly one in `.env` (priority high → low):
 |-------|--------|-------|
 | **A — static** | `RUNNER_TOKEN` | One-off; expires ~1h. |
 | **B — broker** | `BROKER_URL` + `BROKER_SECRET` | Recommended. No GitHub credential in the container; the [token-broker](https://github.com/islee/gh-runners/tree/main/broker) mints fresh tokens. |
-| **PAT** | `ACCESS_TOKEN` | Fine-grained PAT, `organization_self_hosted_runners` scope only — never an admin PAT. |
+| **C — PAT** | `ACCESS_TOKEN` | Fine-grained PAT, `organization_self_hosted_runners` scope only — never an admin PAT. |
 
 ## Notes
+- **Runner names** follow `gh-runner-light-<id>-<n>` — set `<id>` via `OWNER` and `<n>` via
+  `RUNNER_NUMBER` in `.env` / compose (defaults: container hostname / `1`). `docker compose --scale`
+  gives each replica the container's hostname as `<id>` (unique but not sequential); for clean
+  `<id>-<n>` names define separate services with explicit `OWNER`+`RUNNER_NUMBER`.
 - The official runner image is **minimal**. If your jobs need a language toolchain and don't install
   it via `setup-*` actions, add the packages to the `Dockerfile`.
 - **Pin the base image** before real use: `--build-arg BASE_IMAGE=ghcr.io/actions/actions-runner:<tag|digest>`

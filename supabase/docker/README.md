@@ -28,6 +28,9 @@ docker compose down
 Count is **1** by design (a Supabase stack is several GB). The Supabase CLI is **not** baked into the
 image — install it in your workflow (or add it to the `Dockerfile`).
 
+> **Runner name:** registers as `gh-runner-supabase-<id>-<n>` — set `<id>` via `OWNER` and `<n>` via
+> `RUNNER_NUMBER` in `.env`/compose (defaults: container hostname / `1`).
+
 ## Credentials
 Set one in `.env` (priority high → low): `RUNNER_TOKEN` (static, ~1h) → `BROKER_URL`+`BROKER_SECRET`
 ([broker](https://github.com/islee/gh-runners/tree/main/broker), recommended) → `ACCESS_TOKEN` (fine-grained

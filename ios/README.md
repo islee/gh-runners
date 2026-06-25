@@ -24,9 +24,9 @@ This directory is self-contained — copy it to any Mac and run `install.sh`.
 - An **`arm64-v8a` system image** (Apple Silicon runs these natively via Hypervisor.framework):
   ```
   sdkmanager "system-images;android-34;google_apis;arm64-v8a"
-  avdmanager create avd -n ci-runner-arm64 -k "system-images;android-34;google_apis;arm64-v8a"
+  avdmanager create avd -n gh-runner-arm64 -k "system-images;android-34;google_apis;arm64-v8a"
   ```
-- Headless AVD start: `emulator -avd ci-runner-arm64 -no-window -no-audio`
+- Headless AVD start: `emulator -avd gh-runner-arm64 -no-window -no-audio`
 
 ---
 
@@ -36,9 +36,9 @@ This directory is self-contained — copy it to any Mac and run `install.sh`.
 
 | Model | What you receive | Notes |
 |-------|-----------------|-------|
-| **A — registration token** | A one-off `RUNNER_TOKEN` minted for your machine | Expires ~1h; survives only the first registration cycle |
-| **A — fine-grained PAT** | An `ACCESS_TOKEN` scoped to `organization_self_hosted_runners` | Loop mints fresh tokens via the GitHub REST API each cycle |
-| **B — broker** | A `BROKER_URL` + `BROKER_SECRET` pointing at a token-broker instance | No GitHub credential on your machine; broker holds the PAT |
+| **A — static token** | A one-off `RUNNER_TOKEN` minted for your machine | Expires ~1h; survives only the first registration cycle |
+| **B — broker** | A `BROKER_URL` + `BROKER_SECRET` pointing at a token-broker instance | No GitHub credential on your machine; the broker holds the GitHub App key |
+| **C — PAT** | An `ACCESS_TOKEN` scoped to `organization_self_hosted_runners` | Loop mints fresh tokens via the GitHub REST API each cycle |
 
 **Never use the org admin PAT.** The credential you receive must only be able to
 manage runners — not read code, write issues, or access repository secrets.
@@ -49,7 +49,7 @@ manage runners — not read code, write issues, or access repository secrets.
 # Copy this ios/ directory to the Mac (however is convenient — scp, AirDrop, etc.)
 # Then from inside the ios/ directory:
 
-# Model A — fine-grained PAT
+# Model C — fine-grained PAT
 ./install.sh --org your-org --access-token ghp_yourFineGrainedPAT
 
 # Model A — static registration token (short-lived; minted by operator)
@@ -62,6 +62,7 @@ manage runners — not read code, write issues, or access repository secrets.
 
 # Override other defaults if needed
 ./install.sh --org your-org --access-token ghp_... \
+  --owner my-mac \                          # <id> in the runner name gh-runner-ios-<id>-1
   --labels "self-hosted,mobile,ios,android" \
   --runner-dir ~/actions-runner-e2e \
   --allow-battery       # not recommended; see Battery section below
@@ -71,18 +72,21 @@ The installer:
 1. Checks macOS + arm64 and warns (non-fatal) on missing tools.
 2. Writes `~/actions-runner-e2e/config.env` (chmod 600).
 3. Downloads `actions/runner` osx-arm64.
-4. Installs `com.example.ci-runner.plist` → `~/Library/LaunchAgents/` and loads it.
+4. Installs `com.example.gh-runner.plist` → `~/Library/LaunchAgents/` and loads it.
 
 The runner starts immediately and re-registers for each job automatically.
+
+> **Runner name:** registers as `gh-runner-ios-<owner>-1` (the `gh-runner-<type>-<id>-<n>` convention;
+> `<owner>` from `--owner`, default the host short name).
 
 ---
 
 ## Customizing the launchd label
 
-The default LaunchAgent label is `com.example.ci-runner`. If you deploy multiple
+The default LaunchAgent label is `com.example.gh-runner`. If you deploy multiple
 runners on the same Mac, or want to match your team's domain, edit the
 `PLIST_LABEL` constant in `install.sh` and the `<string>` in
-`com.example.ci-runner.plist` before running the installer.
+`com.example.gh-runner.plist` before running the installer.
 
 ---
 
@@ -91,20 +95,20 @@ runners on the same Mac, or want to match your team's domain, edit the
 ### Pause (go offline — runner won't pick up new jobs)
 
 ```bash
-launchctl bootout gui/$(id -u)/com.example.ci-runner
+launchctl bootout gui/$(id -u)/com.example.gh-runner
 ```
 
 ### Resume
 
 ```bash
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.example.ci-runner.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.example.gh-runner.plist
 ```
 
 ### Check status
 
 ```bash
-launchctl list | grep ci-runner
-tail -f ~/Library/Logs/ci-runner.out.log
+launchctl list | grep gh-runner
+tail -f ~/Library/Logs/gh-runner.out.log
 ```
 
 ---
@@ -123,8 +127,8 @@ To allow the runner to work on battery (e.g. Mac mini, always plugged in):
 
 # Or edit config.env manually, then restart:
 echo 'ALLOW_BATTERY=1' >> ~/actions-runner-e2e/config.env
-launchctl bootout   gui/$(id -u)/com.example.ci-runner
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.example.ci-runner.plist
+launchctl bootout   gui/$(id -u)/com.example.gh-runner
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.example.gh-runner.plist
 ```
 
 ---
@@ -133,8 +137,8 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.example.ci-runner.pl
 
 | File | Contents |
 |------|----------|
-| `~/Library/Logs/ci-runner.out.log` | Runner registration + job stdout |
-| `~/Library/Logs/ci-runner.err.log` | Errors, warnings, battery guard messages |
+| `~/Library/Logs/gh-runner.out.log` | Runner registration + job stdout |
+| `~/Library/Logs/gh-runner.err.log` | Errors, warnings, battery guard messages |
 
 ---
 
@@ -195,5 +199,5 @@ Both endpoints return `{"token": "...", "expires_at": "...", "url": "..."}`.
 | `install.sh` | Installs runner binary, config.env, plist; loads launchd agent |
 | `runner-loop.sh` | Ephemeral re-registration loop; driven by launchd |
 | `uninstall.sh` | Stops launchd agent, deregisters from GitHub, optionally purges runner dir |
-| `com.example.ci-runner.plist` | LaunchAgent template (paths substituted by install.sh) |
+| `com.example.gh-runner.plist` | LaunchAgent template (paths substituted by install.sh) |
 | `config.env.example` | Documents all config.env fields (the real config.env is generated) |

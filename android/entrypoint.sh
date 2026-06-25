@@ -35,7 +35,7 @@ GH_ORG="${GH_ORG:-your-org}"  # NOTE: set GH_ORG in your .env file
 RUNNER_NAME="${RUNNER_NAME:-gh-runner-android-${OWNER:-$(hostname -s)}-${RUNNER_NUMBER:-1}}"
 
 # Labels that workflows must match to route jobs to this runner.
-RUNNER_LABELS="${RUNNER_LABELS:-self-hosted,mobile,android}"
+RUNNER_LABELS="${RUNNER_LABELS:-self-hosted,linux,x64,mobile,android}"
 
 # ── Credential resolution ─────────────────────────────────────────────────────
 # Priority: RUNNER_TOKEN (model A) → BROKER_URL+BROKER_SECRET (model B) → ACCESS_TOKEN (PAT).
