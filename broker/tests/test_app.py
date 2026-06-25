@@ -186,17 +186,17 @@ def test_redis_store_record_emits_correct_commands():
         c[0] == "HINCRBY" and c[1] == "ghr:count:host" and c[2] == "my-host:token" for c in cmds
     ), f"missing HINCRBY ghr:count:host my-host:token in {cmds}"
     # Must include HSET on ghr:last:type for "light"
-    assert any(c[0] == "HSET" and c[1] == "ghr:last:type" and c[2] == "light" for c in cmds), (
-        f"missing HSET ghr:last:type light in {cmds}"
-    )
+    assert any(
+        c[0] == "HSET" and c[1] == "ghr:last:type" and c[2] == "light" for c in cmds
+    ), f"missing HSET ghr:last:type light in {cmds}"
     # Must include HSET on ghr:last:host for "my-host"
-    assert any(c[0] == "HSET" and c[1] == "ghr:last:host" and c[2] == "my-host" for c in cmds), (
-        f"missing HSET ghr:last:host my-host in {cmds}"
-    )
+    assert any(
+        c[0] == "HSET" and c[1] == "ghr:last:host" and c[2] == "my-host" for c in cmds
+    ), f"missing HSET ghr:last:host my-host in {cmds}"
     # Must include SET ghr:since ... NX
-    assert any(c[0] == "SET" and c[1] == "ghr:since" and c[-1] == "NX" for c in cmds), (
-        f"missing SET ghr:since NX in {cmds}"
-    )
+    assert any(
+        c[0] == "SET" and c[1] == "ghr:since" and c[-1] == "NX" for c in cmds
+    ), f"missing SET ghr:since NX in {cmds}"
 
 
 def test_redis_store_snapshot_parses_pipeline_response():

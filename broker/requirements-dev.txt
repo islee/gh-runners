@@ -1,4 +1,7 @@
 # Dev/CI-only deps. Runtime deps live in requirements.txt.
 -r requirements.txt
 pytest>=9.1.1,<10
-ruff>=0.15.19,<1
+# CRITICAL: keep this pinned to the SAME ruff as .pre-commit-config.yaml (ruff-pre-commit rev),
+# which is the authoritative formatter run by CI. Drift causes `ruff format` to disagree with the
+# gate and fail CI even when local `ruff format` looks clean. Bump both together.
+ruff==0.6.9
