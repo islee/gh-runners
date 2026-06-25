@@ -251,7 +251,9 @@ class SupabaseStatsStore:
         self._clock = clock
         self._http = http
 
-    async def _request(self, method: str, path: str, *, json: Any = None, params: Any = None) -> Any:
+    async def _request(
+        self, method: str, path: str, *, json: Any = None, params: Any = None
+    ) -> Any:
         """Issue one HTTP call to the PostgREST API. Returns parsed JSON or None."""
         if self._http is not None:
             return await self._http(method, path, json=json, params=params)
@@ -403,26 +405,30 @@ class RedisStatsStore:
         try:
             rtype, host = parse_runner_name(name)
             ts = int(self._clock())
-            await self._pipeline([
-                ["HINCRBY", "ghr:count:type", f"{rtype}:{kind}", 1],
-                ["HINCRBY", "ghr:count:host", f"{host}:{kind}", 1],
-                ["HSET", "ghr:last:type", rtype, ts],
-                ["HSET", "ghr:last:host", host, ts],
-                ["SET", "ghr:since", ts, "NX"],
-            ])
+            await self._pipeline(
+                [
+                    ["HINCRBY", "ghr:count:type", f"{rtype}:{kind}", 1],
+                    ["HINCRBY", "ghr:count:host", f"{host}:{kind}", 1],
+                    ["HSET", "ghr:last:type", rtype, ts],
+                    ["HSET", "ghr:last:host", host, ts],
+                    ["SET", "ghr:since", ts, "NX"],
+                ]
+            )
         except Exception:
             log.warning("redis record failed for kind=%s name=%s", kind, name, exc_info=True)
 
     async def snapshot(self) -> dict:
         """Return aggregated counters from Redis. Returns an error dict on any failure."""
         try:
-            results = await self._pipeline([
-                ["HGETALL", "ghr:count:type"],
-                ["HGETALL", "ghr:count:host"],
-                ["HGETALL", "ghr:last:type"],
-                ["HGETALL", "ghr:last:host"],
-                ["GET", "ghr:since"],
-            ])
+            results = await self._pipeline(
+                [
+                    ["HGETALL", "ghr:count:type"],
+                    ["HGETALL", "ghr:count:host"],
+                    ["HGETALL", "ghr:last:type"],
+                    ["HGETALL", "ghr:last:host"],
+                    ["GET", "ghr:since"],
+                ]
+            )
             count_type_raw, count_host_raw, last_type_raw, last_host_raw, since_raw = results
 
             def _flat_to_dict(flat: list | None) -> dict[str, str]:
@@ -487,7 +493,9 @@ _upstash_configured = bool(_upstash_url and _upstash_token)
 # the legacy service_role JWT alias. Both use the same apikey/Authorization header semantics.
 # WHY prefer SUPABASE_SECRET_KEY: Supabase is migrating to the new key system; old service_role
 # JWTs still work so we keep the legacy alias for backwards compatibility.
-_supabase_service_key = os.environ.get("SUPABASE_SECRET_KEY") or os.environ.get("SUPABASE_SERVICE_KEY")
+_supabase_service_key = os.environ.get("SUPABASE_SECRET_KEY") or os.environ.get(
+    "SUPABASE_SERVICE_KEY"
+)
 _supabase_url_env = os.environ.get("SUPABASE_URL")
 _supabase_project_ref = os.environ.get("SUPABASE_PROJECT_REF")
 if _supabase_url_env:
@@ -509,13 +517,17 @@ def _make_stats() -> RunnerStats | RedisStatsStore | SupabaseStatsStore:
     if STATS_BACKEND == "upstash":
         if _upstash_configured:
             return RedisStatsStore(_upstash_url, _upstash_token)  # type: ignore[arg-type]
-        log.warning("STATS_BACKEND=upstash but UPSTASH_REDIS_REST_URL/TOKEN not set; falling back to memory")
+        log.warning(
+            "STATS_BACKEND=upstash but UPSTASH_REDIS_REST_URL/TOKEN not set; falling back to memory"
+        )
         return RunnerStats(RUNNER_STATS_WINDOW_SECONDS, RUNNER_STATS_MAX_EVENTS)
 
     if STATS_BACKEND == "supabase":
         if _supabase_configured:
             return SupabaseStatsStore(_supabase_url, _supabase_service_key)  # type: ignore[arg-type]
-        log.warning("STATS_BACKEND=supabase but SUPABASE_SERVICE_KEY/URL not set; falling back to memory")
+        log.warning(
+            "STATS_BACKEND=supabase but SUPABASE_SERVICE_KEY/URL not set; falling back to memory"
+        )
         return RunnerStats(RUNNER_STATS_WINDOW_SECONDS, RUNNER_STATS_MAX_EVENTS)
 
     # "auto": Upstash preferred, then Supabase, then in-memory.
@@ -663,14 +675,16 @@ def _aggregate_fleet(runners: list[dict]) -> dict:
             if busy:
                 g["busy"] += 1
 
-        runner_list.append({
-            "name": name,
-            "type": rtype,
-            "host": host,
-            "status": r.get("status", "unknown"),
-            "busy": busy,
-            "labels": labels,
-        })
+        runner_list.append(
+            {
+                "name": name,
+                "type": rtype,
+                "host": host,
+                "status": r.get("status", "unknown"),
+                "busy": busy,
+                "labels": labels,
+            }
+        )
 
     runner_list.sort(key=lambda x: (x["type"], x["host"], x["name"]))
 

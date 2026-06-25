@@ -12,7 +12,14 @@ driven via asyncio.run() in sync tests (no pytest-asyncio dependency).
 import asyncio
 
 import app as appmod
-from app import RateLimiter, RedisStatsStore, RunnerStats, SupabaseStatsStore, app, parse_runner_name
+from app import (
+    RateLimiter,
+    RedisStatsStore,
+    RunnerStats,
+    SupabaseStatsStore,
+    app,
+    parse_runner_name,
+)
 from fastapi.testclient import TestClient
 
 client = TestClient(app)
@@ -172,29 +179,24 @@ def test_redis_store_record_emits_correct_commands():
     cmds = fake.captured
     # Must include HINCRBY on ghr:count:type for "light:token"
     assert any(
-        c[0] == "HINCRBY" and c[1] == "ghr:count:type" and c[2] == "light:token"
-        for c in cmds
+        c[0] == "HINCRBY" and c[1] == "ghr:count:type" and c[2] == "light:token" for c in cmds
     ), f"missing HINCRBY ghr:count:type light:token in {cmds}"
     # Must include HINCRBY on ghr:count:host for "my-host:token"
     assert any(
-        c[0] == "HINCRBY" and c[1] == "ghr:count:host" and c[2] == "my-host:token"
-        for c in cmds
+        c[0] == "HINCRBY" and c[1] == "ghr:count:host" and c[2] == "my-host:token" for c in cmds
     ), f"missing HINCRBY ghr:count:host my-host:token in {cmds}"
     # Must include HSET on ghr:last:type for "light"
-    assert any(
-        c[0] == "HSET" and c[1] == "ghr:last:type" and c[2] == "light"
-        for c in cmds
-    ), f"missing HSET ghr:last:type light in {cmds}"
+    assert any(c[0] == "HSET" and c[1] == "ghr:last:type" and c[2] == "light" for c in cmds), (
+        f"missing HSET ghr:last:type light in {cmds}"
+    )
     # Must include HSET on ghr:last:host for "my-host"
-    assert any(
-        c[0] == "HSET" and c[1] == "ghr:last:host" and c[2] == "my-host"
-        for c in cmds
-    ), f"missing HSET ghr:last:host my-host in {cmds}"
+    assert any(c[0] == "HSET" and c[1] == "ghr:last:host" and c[2] == "my-host" for c in cmds), (
+        f"missing HSET ghr:last:host my-host in {cmds}"
+    )
     # Must include SET ghr:since ... NX
-    assert any(
-        c[0] == "SET" and c[1] == "ghr:since" and c[-1] == "NX"
-        for c in cmds
-    ), f"missing SET ghr:since NX in {cmds}"
+    assert any(c[0] == "SET" and c[1] == "ghr:since" and c[-1] == "NX" for c in cmds), (
+        f"missing SET ghr:since NX in {cmds}"
+    )
 
 
 def test_redis_store_snapshot_parses_pipeline_response():
@@ -206,13 +208,15 @@ def test_redis_store_snapshot_parses_pipeline_response():
     last_host_flat = ["my-host", "1700000100"]
     since_val = "1699999999"
 
-    fake = FakeRedisHttp(results=[
-        count_type_flat,
-        count_host_flat,
-        last_type_flat,
-        last_host_flat,
-        since_val,
-    ])
+    fake = FakeRedisHttp(
+        results=[
+            count_type_flat,
+            count_host_flat,
+            last_type_flat,
+            last_host_flat,
+            since_val,
+        ]
+    )
     store = RedisStatsStore(url="https://redis.example.com", token="tok", http=fake)
     snap = asyncio.run(store.snapshot())
 
@@ -278,17 +282,43 @@ def test_supabase_store_record_issues_two_rpc_calls():
 def test_supabase_store_snapshot_parses_rows():
     # Canned PostgREST row responses: two type rows + two host rows, plus meta.
     stats_rows = [
-        {"dimension": "type", "key": "light",    "kind": "token",        "count": 5,  "last_seen": "2026-06-25T08:00:00+00:00"},
-        {"dimension": "type", "key": "supabase", "kind": "remove-token", "count": 1,  "last_seen": "2026-06-25T09:00:00+00:00"},
-        {"dimension": "host", "key": "my-host","kind": "token",        "count": 5,  "last_seen": "2026-06-25T08:00:00+00:00"},
-        {"dimension": "host", "key": "my-host","kind": "remove-token", "count": 1,  "last_seen": "2026-06-25T09:00:00+00:00"},
+        {
+            "dimension": "type",
+            "key": "light",
+            "kind": "token",
+            "count": 5,
+            "last_seen": "2026-06-25T08:00:00+00:00",
+        },
+        {
+            "dimension": "type",
+            "key": "supabase",
+            "kind": "remove-token",
+            "count": 1,
+            "last_seen": "2026-06-25T09:00:00+00:00",
+        },
+        {
+            "dimension": "host",
+            "key": "my-host",
+            "kind": "token",
+            "count": 5,
+            "last_seen": "2026-06-25T08:00:00+00:00",
+        },
+        {
+            "dimension": "host",
+            "key": "my-host",
+            "kind": "remove-token",
+            "count": 1,
+            "last_seen": "2026-06-25T09:00:00+00:00",
+        },
     ]
     meta_rows = [{"since": "2026-06-01T00:00:00+00:00"}]
 
-    fake = FakeSupabaseHttp(responses={
-        "/rest/v1/runner_stats": stats_rows,
-        "/rest/v1/runner_stats_meta": meta_rows,
-    })
+    fake = FakeSupabaseHttp(
+        responses={
+            "/rest/v1/runner_stats": stats_rows,
+            "/rest/v1/runner_stats_meta": meta_rows,
+        }
+    )
     store = SupabaseStatsStore(url="https://proj.supabase.co", service_key="svckey", http=fake)
     snap = asyncio.run(store.snapshot())
 
