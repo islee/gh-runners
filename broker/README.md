@@ -47,9 +47,10 @@ the repo-root `.github/workflows/ci.yml`.)
 |--------|------|------|---------|
 | `POST` | `/token` | `Bearer $BROKER_SECRET` | `{"token","expires_at","url"}` registration token |
 | `POST` | `/remove-token` | `Bearer $BROKER_SECRET` | `{"token","expires_at"}` |
+| `GET` | `/stats` | `Bearer $BROKER_SECRET` | recent token activity by type / host / runner |
 | `GET` | `/health` | none | `{"ok":true}` |
 
-Optional `X-Runner-Name` header is logged for attribution.
+Optional `X-Runner-Name` header is logged for attribution **and feeds `/stats`** (see below).
 
 > **Labels are NOT enforceable by this service.** A runner self-assigns its labels at `config.sh
 > --labels` time; they are not encoded in the registration token, so the broker cannot restrict them.
@@ -63,6 +64,35 @@ auth, so it also throttles secret-guessing. Tune with `RATE_LIMIT_PER_MINUTE` (d
 `RATE_LIMIT_BURST` (default = per-minute); set `RATE_LIMIT_PER_MINUTE=0` to disable. Over-limit
 callers get `429` with a `Retry-After` header. Behind Render the client IP is read from
 `X-Forwarded-For`. **State is in-process**, so with multiple instances the limit is per-instance.
+
+## Recent stats
+
+`GET /stats` (auth-gated, rate-limited) reports **recent token activity** so you can see which runner
+types and hosts have been active without standing up any datastore. Every `/token` / `/remove-token`
+call carries the runner's `X-Runner-Name` (`gh-runner-<type>-<id>-<n>`), which the broker parses into
+`type` + `host` and records in a time-windowed, in-process ring buffer.
+
+```bash
+curl -fsS -H "Authorization: Bearer $BROKER_SECRET" https://<service>/stats | jq .
+```
+```jsonc
+{
+  "window_seconds": 86400,
+  "generated_at": "2026-06-25T08:47:59Z",
+  "total_events": 42,
+  "totals": { "token": 40, "remove-token": 2 },
+  "by_type": { "light": { "token": 28, "remove-token": 0, "runners": 2, "last_seen": "…" }, … },
+  "by_host": { "ci-linple": { "token": 40, "remove-token": 2, "runners": 4, "last_seen": "…" } },
+  "runners": [ { "name": "gh-runner-light-ci-linple-1", "type": "light", "host": "ci-linple",
+                 "token": 14, "remove-token": 0, "last_seen": "…" }, … ]
+}
+```
+
+- **In-process & windowed** — state resets on restart / Render cold start; it's *recent activity*, not
+  durable accounting. Window = `RUNNER_STATS_WINDOW_SECONDS` (default `86400` = 24 h); the buffer is
+  capped at `RUNNER_STATS_MAX_EVENTS` (default `10000`) as a memory backstop.
+- **Auth-gated** because it exposes fleet topology (types, hosts, runner names). A name that doesn't
+  fit `gh-runner-<type>-<id>-<n>` is bucketed as type `unknown`.
 
 ## Credentials & security
 

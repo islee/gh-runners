@@ -18,10 +18,12 @@ for attribution. Use GitHub *runner groups* to scope what runners may do.
 
 from __future__ import annotations
 
+import collections
 import hmac
 import logging
 import os
 import time
+from datetime import datetime, timezone
 
 import httpx
 import jwt
@@ -53,6 +55,13 @@ _inst: dict = {"token": None, "exp": 0.0}
 # buckets, so the effective limit is per-instance. Fine for a single small-fleet deployment.
 RATE_LIMIT_PER_MINUTE = int(os.environ.get("RATE_LIMIT_PER_MINUTE", "30"))
 RATE_LIMIT_BURST = int(os.environ.get("RATE_LIMIT_BURST", str(RATE_LIMIT_PER_MINUTE)))
+
+# Recent-activity stats. The broker sees every (re)registration as a /token call carrying the
+# runner's X-Runner-Name (gh-runner-<type>-<id>-<n>), so it can report which runner types/hosts have
+# been active lately — without any datastore. State is in-process and time-windowed; it resets on
+# restart / Render cold start, so treat it as "recent activity", not durable accounting.
+RUNNER_STATS_WINDOW_SECONDS = int(os.environ.get("RUNNER_STATS_WINDOW_SECONDS", "86400"))
+RUNNER_STATS_MAX_EVENTS = int(os.environ.get("RUNNER_STATS_MAX_EVENTS", "10000"))
 
 
 class RateLimiter:
@@ -89,6 +98,116 @@ class RateLimiter:
 _limiter = (
     RateLimiter(RATE_LIMIT_PER_MINUTE, RATE_LIMIT_BURST) if RATE_LIMIT_PER_MINUTE > 0 else None
 )
+
+
+def parse_runner_name(name: str | None) -> tuple[str, str]:
+    """Split a `gh-runner-<type>-<id>-<n>` runner name into (type, host).
+
+    `<id>` (the host/owner tag) may itself contain hyphens (e.g. `ci-linple`); `<n>` is always the
+    last segment, so type is the 3rd field and host is everything between it and the trailing number.
+    Anything that doesn't fit the convention maps to ('unknown', name or 'unknown')."""
+    if not name:
+        return ("unknown", "unknown")
+    parts = name.split("-")
+    if len(parts) >= 5 and parts[0] == "gh" and parts[1] == "runner":
+        return (parts[2], "-".join(parts[3:-1]))
+    return ("unknown", name)
+
+
+def _iso(ts: float) -> str | None:
+    """Epoch seconds -> 'YYYY-MM-DDTHH:MM:SSZ' (UTC), or None for a falsy timestamp."""
+    if not ts:
+        return None
+    return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+class RunnerStats:
+    """In-process, time-windowed record of recent token activity, keyed by runner.
+
+    Each record() appends (ts, kind, name, type, host); events older than `window` seconds are pruned
+    lazily on read/write, and the deque is hard-capped at `max_events` as a memory backstop. `clock`
+    is injectable for testing. Single-process / single-worker only (matching the broker's design)."""
+
+    def __init__(self, window_s: int, max_events: int, clock=time.time):
+        self.window = window_s
+        self._clock = clock
+        self._events: collections.deque = collections.deque(maxlen=max_events)
+
+    def record(self, kind: str, name: str | None) -> None:
+        rtype, host = parse_runner_name(name)
+        self._events.append((self._clock(), kind, name or "?", rtype, host))
+
+    def _prune(self, now: float) -> None:
+        cutoff = now - self.window
+        while self._events and self._events[0][0] < cutoff:
+            self._events.popleft()
+
+    def snapshot(self) -> dict:
+        now = self._clock()
+        self._prune(now)
+        totals: dict[str, int] = {"token": 0, "remove-token": 0}
+        by_type: dict[str, dict] = {}
+        by_host: dict[str, dict] = {}
+        by_runner: dict[str, dict] = {}
+
+        def _agg(table: dict, key: str) -> dict:
+            return table.setdefault(
+                key, {"token": 0, "remove-token": 0, "runners": set(), "last_seen": 0.0}
+            )
+
+        for ts, kind, name, rtype, host in self._events:
+            totals[kind] = totals.get(kind, 0) + 1
+            for table, key in ((by_type, rtype), (by_host, host)):
+                e = _agg(table, key)
+                e[kind] = e.get(kind, 0) + 1
+                e["runners"].add(name)
+                e["last_seen"] = max(e["last_seen"], ts)
+            r = by_runner.setdefault(
+                name,
+                {"type": rtype, "host": host, "token": 0, "remove-token": 0, "last_seen": 0.0},
+            )
+            r[kind] = r.get(kind, 0) + 1
+            r["last_seen"] = max(r["last_seen"], ts)
+
+        def _fmt_group(table: dict) -> dict:
+            return {
+                key: {
+                    "token": e["token"],
+                    "remove-token": e["remove-token"],
+                    "runners": len(e["runners"]),
+                    "last_seen": _iso(e["last_seen"]),
+                }
+                for key, e in table.items()
+            }
+
+        runners = sorted(
+            (
+                {
+                    "name": name,
+                    "type": r["type"],
+                    "host": r["host"],
+                    "token": r["token"],
+                    "remove-token": r["remove-token"],
+                    "last_seen": _iso(r["last_seen"]),
+                }
+                for name, r in by_runner.items()
+            ),
+            key=lambda x: x["last_seen"] or "",
+            reverse=True,
+        )
+
+        return {
+            "window_seconds": self.window,
+            "generated_at": _iso(now),
+            "total_events": len(self._events),
+            "totals": totals,
+            "by_type": _fmt_group(by_type),
+            "by_host": _fmt_group(by_host),
+            "runners": runners,
+        }
+
+
+_stats = RunnerStats(RUNNER_STATS_WINDOW_SECONDS, RUNNER_STATS_MAX_EVENTS)
 
 
 def _client_key(request: Request) -> str:
@@ -170,6 +289,7 @@ async def token(
     _rate_limit(request)
     _check_auth(authorization)
     d = await _mint("registration-token")
+    _stats.record("token", x_runner_name)
     log.info("minted registration token for runner=%s", x_runner_name or "?")
     return {"token": d["token"], "expires_at": d["expires_at"], "url": f"https://github.com/{ORG}"}
 
@@ -183,5 +303,18 @@ async def remove_token(
     _rate_limit(request)
     _check_auth(authorization)
     d = await _mint("remove-token")
+    _stats.record("remove-token", x_runner_name)
     log.info("minted remove token for runner=%s", x_runner_name or "?")
     return {"token": d["token"], "expires_at": d["expires_at"]}
+
+
+@app.get("/stats")
+async def stats(
+    request: Request,
+    authorization: str | None = Header(default=None),
+) -> dict:
+    """Recent token activity aggregated by runner type, host, and name. Auth-gated (it exposes fleet
+    topology) and rate-limited, same as the token endpoints. In-process window; resets on restart."""
+    _rate_limit(request)
+    _check_auth(authorization)
+    return _stats.snapshot()
