@@ -61,6 +61,9 @@ RUN apt-get update && \
         openjdk-17-jdk-headless \
         curl \
         unzip \
+        zip \
+        xz-utils \
+        zstd \
         jq \
         ca-certificates \
         gnupg \

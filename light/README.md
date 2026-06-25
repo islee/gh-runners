@@ -17,6 +17,13 @@ inbound ports).
   root by default — don't use root.
 - One credential — see [Credentials](#credentials).
 
+> **Job-runtime baseline (hosted-runner parity).** A bare host lacks tools that GitHub-hosted images
+> ship and that `setup-*` actions shell out to, so jobs fail mid-run (`Unable to locate executable
+> file: unzip` / `lsb_release`). `install.sh` therefore **installs a declared baseline ahead of
+> time** (`unzip zip xz-utils zstd lsb-release ca-certificates`; extend with `--extra-packages`) and
+> points the runner at a shared tool cache via `AGENT_TOOLSDIRECTORY`. See
+> [Hosted-runner parity](#hosted-runner-parity).
+
 ## Install
 Copy this `light/` directory to the host, then:
 
@@ -47,9 +54,28 @@ light and supabase runners share a host), and enables `gh-runner-light@1 .. gh-r
 | `--owner` | host short name | `<id>` in the runner name `gh-runner-light-<id>-<n>` (use a username on a shared fleet) |
 | `--runner-base` | `/opt/gh-runner-light` | Parent dir; instance `i` lives at `<base>/<i>` |
 | `--runner-version` | pinned | Bump when GitHub rejects the pinned version |
+| `--extra-packages` | — | Extra apt packages to install ahead of time (e.g. `"ripgrep make"`) |
+| `--skip-job-deps` | off | Don't install the job-runtime OS baseline |
+| `--toolcache-dir` | `/opt/hostedtoolcache` | Shared tool cache (`AGENT_TOOLSDIRECTORY`) |
+| `--skip-toolcache` | off | Don't create/stage the tool cache |
+| `--stage-python` | — | Repeatable: pre-stage Python `<ver>` (e.g. `3.13`) — **required for setup-python on non-Ubuntu hosts** |
 
 > **Runner names:** each instance registers as `gh-runner-light-<owner>-<i>` (the
 > `gh-runner-<type>-<id>-<n>` convention) — fixed per instance, re-registered each cycle with `--replace`.
+
+## Hosted-runner parity
+GitHub-hosted runners ship a large toolset and a pre-populated tool cache. A bare self-hosted host has
+neither, so `setup-*` actions fail at runtime. `install.sh` closes the gap **ahead of time**:
+
+- **OS baseline** — installs `unzip zip xz-utils zstd lsb-release ca-certificates` (extend with
+  `--extra-packages`, opt out with `--skip-job-deps`). On non-apt distros it warns instead.
+- **Tool cache** — creates `--toolcache-dir` (default `/opt/hostedtoolcache`) and bakes
+  `Environment=AGENT_TOOLSDIRECTORY=…` into the systemd unit. The runner derives `RUNNER_TOOL_CACHE`
+  from it, so `setup-python`/`-node`/`-deno` resolve from one shared, persistent cache.
+- **setup-python on non-Ubuntu hosts** — `actions/setup-python` only publishes prebuilt Pythons for
+  Ubuntu; on Debian/other distros it cannot download and errors *unless the version is already in the
+  tool cache*. Pass `--stage-python 3.13` (repeatable) to pre-stage it from `actions/python-versions`.
+  On **Ubuntu** hosts this is optional — `setup-python` downloads successfully (just uncached).
 
 ## Credentials
 Supply exactly one (priority high → low):

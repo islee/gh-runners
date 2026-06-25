@@ -12,11 +12,15 @@
 ARG BASE_IMAGE=ghcr.io/actions/actions-runner:latest
 FROM ${BASE_IMAGE}
 
-# Install the entrypoint's runtime deps. USER root for apt, then drop back to the unprivileged
-# `runner` user the official image runs as.
+# Install the entrypoint's runtime deps (curl, jq) plus the hosted-runner job baseline the official
+# image lacks. The Ubuntu base already ships unzip/lsb_release/python3 (so setup-deno/setup-python
+# work — setup-python downloads a prebuilt Python, since the base IS Ubuntu, unlike the native Debian
+# host), but it is missing zip + the actions/cache compressors (xz-utils, zstd). Add them for parity.
+# USER root for apt, then drop back to the unprivileged `runner` user the official image runs as.
 USER root
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends curl jq ca-certificates && \
+    apt-get install -y --no-install-recommends \
+        curl jq ca-certificates zip xz-utils zstd && \
     rm -rf /var/lib/apt/lists/*
 
 COPY entrypoint.sh /opt/entrypoint.sh

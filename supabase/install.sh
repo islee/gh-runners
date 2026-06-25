@@ -11,8 +11,15 @@
 #   sudo ./install.sh (--token TOKEN | --broker-url URL [--broker-secret SECRET] | --access-token PAT)
 #                     [--org ORG] [--labels LABELS] [--count N] [--user RUN_USER]
 #                     [--runner-base DIR] [--runner-version VERSION]
+#                     [--extra-packages "p1 p2"] [--skip-job-deps]
+#                     [--toolcache-dir DIR] [--skip-toolcache] [--stage-python VER ...]
 #
 # Credential priority (high -> low): static token -> broker -> PAT. Supply exactly one.
+#
+# Hosted-runner parity: by default this installs a baseline of job-runtime OS packages
+# (unzip/zip/xz-utils/zstd) and points the runner at a shared tool cache via AGENT_TOOLSDIRECTORY.
+# Pass --stage-python 3.13 (repeatable) to pre-stage a Python there — REQUIRED for actions/setup-python
+# on non-Ubuntu hosts (Debian etc.), which cannot download a prebuilt Python and otherwise error.
 
 set -euo pipefail
 
@@ -46,6 +53,26 @@ OWNER="${OWNER:-$(hostname -s)}"
 : "${BROKER_SECRET:=}"
 : "${ACCESS_TOKEN:=}"
 
+# Job-runtime parity (see install_job_deps / provision_toolcache). GitHub-hosted runners ship a
+# baseline of tools that setup-* actions and typical jobs assume; a bare host has none, so jobs fail
+# at runtime. We declare them here and install ahead of time.
+#   - DEFAULT_JOB_PACKAGES: hosted-runner baseline that setup-* actions shell out to —
+#     unzip (setup-deno/cmdline-tools), zip, xz-utils/zstd (actions/cache compression),
+#     lsb-release (setup-python OS detection), ca-certificates (TLS). Extend with --extra-packages.
+#     supabase-specific: postgresql-client (psql) — Postgres-stack jobs (e.g. plpgsql-check) need it
+#     and cannot self-install it (the runner user has no passwordless sudo).
+#   - TOOLCACHE_DIR: shared, persistent tool cache the runner is pointed at via AGENT_TOOLSDIRECTORY.
+#   - STAGE_PYTHON_VERSIONS: Python versions to pre-stage there (required for setup-python on
+#     non-Ubuntu hosts, which cannot download a prebuilt Python). Populate with --stage-python.
+readonly DEFAULT_JOB_PACKAGES="unzip zip xz-utils zstd lsb-release ca-certificates postgresql-client"
+readonly DEFAULT_TOOLCACHE_DIR="/opt/hostedtoolcache"
+JOB_PACKAGES="${JOB_PACKAGES:-${DEFAULT_JOB_PACKAGES}}"
+EXTRA_PACKAGES=""
+SKIP_JOB_DEPS=0
+TOOLCACHE_DIR="${TOOLCACHE_DIR:-${DEFAULT_TOOLCACHE_DIR}}"
+SKIP_TOOLCACHE=0
+STAGE_PYTHON_VERSIONS=()
+
 # ── Arg parsing ────────────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -60,9 +87,15 @@ while [[ $# -gt 0 ]]; do
     --owner)          OWNER="$2";           shift 2 ;;
     --runner-base)    RUNNER_BASE="$2";     shift 2 ;;
     --runner-version) RUNNER_VERSION="$2";  shift 2 ;;
+    --extra-packages) EXTRA_PACKAGES="$2";  shift 2 ;;   # extra apt packages to install ahead of time
+    --skip-job-deps)  SKIP_JOB_DEPS=1;      shift   ;;   # do not install job-runtime OS packages
+    --toolcache-dir)  TOOLCACHE_DIR="$2";   shift 2 ;;   # shared tool cache dir (AGENT_TOOLSDIRECTORY)
+    --skip-toolcache) SKIP_TOOLCACHE=1;     shift   ;;   # do not create/stage the tool cache
+    --stage-python)   STAGE_PYTHON_VERSIONS+=("$2"); shift 2 ;;  # repeatable: pre-stage Python <ver> (e.g. 3.13)
     *) echo "Unknown flag: $1" >&2
        echo "Usage: sudo $0 (--token T | --broker-url URL [--broker-secret S] | --access-token PAT)" >&2
        echo "         [--org ORG] [--labels LABELS] [--count N] [--user USER] [--runner-base DIR] [--runner-version V]" >&2
+       echo "         [--extra-packages \"p1 p2\"] [--skip-job-deps] [--toolcache-dir DIR] [--skip-toolcache] [--stage-python VER ...]" >&2
        exit 1 ;;
   esac
 done
@@ -96,6 +129,76 @@ case "${ARCH}" in
   aarch64) RUNNER_ARCH="arm64" ;;
   *) fatal "Unsupported arch '${ARCH}' (expected x86_64 or aarch64)." ;;
 esac
+
+# ── Job-runtime dependencies — install ahead of time (hosted-runner parity) ─────
+# WHY here (before the runner download): a missing tool surfaces only mid-job as a confusing
+# "Unable to locate executable file: <tool>" failure. Declaring + installing the baseline up front
+# turns that runtime surprise into a deterministic provisioning step.
+install_job_deps() {
+  (( SKIP_JOB_DEPS )) && { info "Skipping job-runtime dependency install (--skip-job-deps)."; return 0; }
+  local pkgs="${JOB_PACKAGES} ${EXTRA_PACKAGES}"
+  if command -v apt-get &>/dev/null; then
+    info "Installing job-runtime dependencies ahead of time: ${pkgs}"
+    DEBIAN_FRONTEND=noninteractive apt-get update -qq
+    # shellcheck disable=SC2086  # word-splitting is intentional — pkgs is a space-separated list.
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ${pkgs}
+  else
+    warn "apt-get not found — install these job-runtime deps yourself before running jobs: ${pkgs}"
+  fi
+}
+
+# ── Tool cache for setup-python (and -node/-deno) — non-Ubuntu native hosts ──────
+# actions/setup-python only publishes prebuilt Pythons for Ubuntu; on Debian/other distros it cannot
+# download one and errors ("version 'X' ... was not found for this operating system") UNLESS the
+# version is already in the runner tool cache. We point the runner at a shared, persistent cache via
+# AGENT_TOOLSDIRECTORY (baked into the systemd unit) and pre-stage requested versions here using
+# actions/python-versions' own setup.sh — the same mechanism GitHub uses to build hosted images.
+stage_python_toolcache() {
+  local spec="$1"   # e.g. 3.13 or 3.13.14
+  info "Staging Python '${spec}' into tool cache ${TOOLCACHE_DIR} ..."
+  local manifest full url
+  manifest="$(curl -fsSL https://raw.githubusercontent.com/actions/python-versions/main/versions-manifest.json)" \
+    || fatal "Could not fetch the python-versions manifest."
+  # Resolve the highest stable build matching <spec> that has a linux/<arch> asset; prefer newer
+  # Ubuntu (binaries are forward-compatible with newer glibc, so 24.04 runs fine on Debian 13).
+  read -r full url < <(printf '%s' "${manifest}" | python3 -c '
+import json, sys
+spec, arch = sys.argv[1], sys.argv[2]
+data = json.load(sys.stdin)                       # manifest is newest-first
+def match(v): return v == spec or v.startswith(spec + ".")
+for rel in data:
+    if rel.get("stable") is not True or not match(rel["version"]):
+        continue
+    files = {f["platform_version"]: f for f in rel["files"]
+             if f["platform"] == "linux" and f["arch"] == arch}
+    for pv in ("24.04", "22.04", "20.04"):
+        if pv in files:
+            print(rel["version"], files[pv]["download_url"]); sys.exit(0)
+sys.exit(1)
+' "${spec}" "${RUNNER_ARCH}") \
+    || fatal "No linux/${RUNNER_ARCH} python-versions build matches '${spec}'."
+  local tmp; tmp="$(mktemp -d)"
+  curl -fsSL "${url}" -o "${tmp}/py.tgz" || fatal "Download failed: ${url}"
+  tar -xzf "${tmp}/py.tgz" -C "${tmp}"
+  # setup.sh reads AGENT_TOOLSDIRECTORY, lays out Python/<ver>/<arch>, and writes the .complete marker.
+  ( cd "${tmp}" && AGENT_TOOLSDIRECTORY="${TOOLCACHE_DIR}" bash ./setup.sh )
+  rm -rf "${tmp}"
+  info "Staged Python ${full} → ${TOOLCACHE_DIR}/Python/${full}/${RUNNER_ARCH}"
+}
+
+provision_toolcache() {
+  (( SKIP_TOOLCACHE )) && { info "Skipping tool-cache provisioning (--skip-toolcache)."; return 0; }
+  mkdir -p "${TOOLCACHE_DIR}"
+  local v
+  for v in "${STAGE_PYTHON_VERSIONS[@]:-}"; do
+    [[ -n "${v}" ]] && stage_python_toolcache "${v}"
+  done
+  # Runner must read/write the cache (setup-node/-deno populate it on first use).
+  chown -R "${RUN_USER}" "${TOOLCACHE_DIR}"
+}
+
+install_job_deps
+provision_toolcache
 
 # ── Download actions/runner tarball once (shared across instances) ─────────────
 RUNNER_TGZ="actions-runner-linux-${RUNNER_ARCH}-${RUNNER_VERSION}.tar.gz"
@@ -146,6 +249,7 @@ rm -f "${TMP_TGZ}"
 DEST_UNIT="/etc/systemd/system/${UNIT_NAME}"
 info "Installing systemd template → ${DEST_UNIT}"
 sed -e "s|__RUNNER_BASE__|${RUNNER_BASE}|g" -e "s|__RUN_USER__|${RUN_USER}|g" \
+  -e "s|__TOOLCACHE_DIR__|${TOOLCACHE_DIR}|g" \
   "${SCRIPT_DIR}/${SERVICE_NAME}" > "${DEST_UNIT}"
 systemctl daemon-reload
 for i in $(seq 1 "${COUNT}"); do
