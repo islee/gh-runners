@@ -1,0 +1,27 @@
+version: 2
+# Keeps the SHA-pinned GitHub Actions and the broker's Python deps current. Dependabot understands
+# SHA-pinned actions with a `# vX.Y.Z` comment and bumps both the SHA and the comment.
+#
+# NOTE: Dependabot has NO pre-commit ecosystem — it does not update .pre-commit-config.yaml hook
+# revs. Refresh those with `pre-commit autoupdate` (periodically, or via pre-commit.ci).
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+
+  - package-ecosystem: pip
+    directory: /broker
+    schedule:
+      interval: weekly
+    groups:
+      broker-python:
+        patterns: ["*"]
+
+  - package-ecosystem: docker
+    directory: /broker
+    schedule:
+      interval: weekly
