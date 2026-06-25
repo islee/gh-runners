@@ -12,7 +12,9 @@ set -euo pipefail
 
 readonly DEFAULT_COUNT=1
 readonly DEFAULT_RUNNER_BASE="/opt/gh-runner-supabase"
-readonly SERVICE_NAME="gh-runner@.service"
+readonly RUNNER_TYPE="supabase"
+# UNIT_NAME is the installed per-type name (matches install.sh); keeps co-hosted types independent.
+readonly UNIT_NAME="gh-runner-${RUNNER_TYPE}@.service"
 
 COUNT="${COUNT:-${DEFAULT_COUNT}}"
 RUNNER_BASE="${RUNNER_BASE:-${DEFAULT_RUNNER_BASE}}"
@@ -34,13 +36,13 @@ warn() { echo "[WARN]  $*" >&2; }
 [[ "$(id -u)" -eq 0 ]] || { echo "[ERROR] Run with sudo." >&2; exit 1; }
 
 for i in $(seq 1 "${COUNT}"); do
-  if systemctl list-unit-files "gh-runner@.service" &>/dev/null; then
-    info "Stopping + disabling gh-runner@${i} (SIGTERM lets the loop deregister)..."
-    systemctl disable --now "gh-runner@${i}.service" 2>/dev/null || warn "gh-runner@${i} was not active."
+  if systemctl list-unit-files "${UNIT_NAME}" &>/dev/null; then
+    info "Stopping + disabling gh-runner-${RUNNER_TYPE}@${i} (SIGTERM lets the loop deregister)..."
+    systemctl disable --now "gh-runner-${RUNNER_TYPE}@${i}.service" 2>/dev/null || warn "gh-runner-${RUNNER_TYPE}@${i} was not active."
   fi
 done
 
-DEST_UNIT="/etc/systemd/system/${SERVICE_NAME}"
+DEST_UNIT="/etc/systemd/system/${UNIT_NAME}"
 if [[ -f "${DEST_UNIT}" ]]; then
   rm -f "${DEST_UNIT}"
   systemctl daemon-reload

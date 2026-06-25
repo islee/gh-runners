@@ -2,8 +2,8 @@
 # install.sh — set up N ephemeral "light" GitHub Actions runners (vanilla actions/runner + systemd).
 #
 # Installs the official actions/runner into one dir per instance under a base dir, writes each a
-# config.env (mode 600), and registers a systemd template service (gh-runner@1 .. gh-runner@N) that
-# runs runner-loop.sh. No Docker, no third-party image.
+# config.env (mode 600), and registers a systemd template service (gh-runner-light@1 .. gh-runner-light@N)
+# that runs runner-loop.sh. No Docker, no third-party image.
 #
 # Run with sudo (writes /etc/systemd/system and chowns runner dirs to the run user).
 #
@@ -26,6 +26,9 @@ readonly RUNNER_TYPE="light"   # <type> in the gh-runner-<type>-<id>-<n> name co
 readonly DEFAULT_COUNT=2
 readonly DEFAULT_RUNNER_BASE="/opt/gh-runner-light"
 readonly SERVICE_NAME="gh-runner@.service"
+# SERVICE_NAME is the source template filename (kept generic); UNIT_NAME is the installed unit name,
+# per-type so co-hosted runner types (light + supabase) don't overwrite each other's template.
+readonly UNIT_NAME="gh-runner-${RUNNER_TYPE}@.service"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; readonly SCRIPT_DIR
 
 GH_ORG="${GH_ORG:-${DEFAULT_ORG}}"
@@ -131,14 +134,14 @@ done
 rm -f "${TMP_TGZ}"
 
 # ── Install + enable systemd template ──────────────────────────────────────────
-DEST_UNIT="/etc/systemd/system/${SERVICE_NAME}"
+DEST_UNIT="/etc/systemd/system/${UNIT_NAME}"
 info "Installing systemd template → ${DEST_UNIT}"
 sed -e "s|__RUNNER_BASE__|${RUNNER_BASE}|g" -e "s|__RUN_USER__|${RUN_USER}|g" \
   "${SCRIPT_DIR}/${SERVICE_NAME}" > "${DEST_UNIT}"
 systemctl daemon-reload
 for i in $(seq 1 "${COUNT}"); do
-  systemctl enable --now "gh-runner@${i}.service"
-  info "Started gh-runner@${i}.service"
+  systemctl enable --now "gh-runner-${RUNNER_TYPE}@${i}.service"
+  info "Started gh-runner-${RUNNER_TYPE}@${i}.service"
 done
 
 echo ""
@@ -146,8 +149,8 @@ echo "==========================================================="
 echo " light runners installed: ${COUNT} instance(s) under ${RUNNER_BASE}"
 echo " Run user : ${RUN_USER}    Org: ${GH_ORG}    Labels: ${RUNNER_LABELS}"
 echo "==========================================================="
-echo " Status : systemctl status 'gh-runner@*'"
-echo " Logs   : journalctl -u 'gh-runner@1' -f"
-echo " Stop   : systemctl disable --now gh-runner@1   (per instance)"
+echo " Status : systemctl status 'gh-runner-${RUNNER_TYPE}@*'"
+echo " Logs   : journalctl -u 'gh-runner-${RUNNER_TYPE}@1' -f"
+echo " Stop   : systemctl disable --now gh-runner-${RUNNER_TYPE}@1   (per instance)"
 echo " Uninstall: sudo ./uninstall.sh --count ${COUNT} --runner-base ${RUNNER_BASE}"
 echo "==========================================================="

@@ -25,6 +25,7 @@ or **Docker** ([`broker/docker-compose.yml`](broker/docker-compose.yml) / `broke
 | [`supabase/`](supabase/) | Jobs that run a Docker stack (e.g. `supabase start`) | Vanilla `actions/runner` + **systemd**, on a host that has Docker | `self-hosted,linux,x64,supabase` |
 | [`android/`](android/) | Android E2E (emulator + Maestro) | **Docker** on the official `ghcr.io/actions/actions-runner` image, KVM-accelerated | `self-hosted,linux,x64,mobile,android` |
 | [`ios/`](ios/) | iOS E2E (+ Android-on-Mac) | Vanilla `actions/runner` + **launchd** (macOS, Apple Silicon) | `self-hosted,mobile,ios,android` |
+| [`windows/`](windows/) | Lint / unit / anything without Docker, on Windows | Vanilla `actions/runner` + **Task Scheduler** (native, no NSSM) | `self-hosted,windows,x64,light` |
 
 Each directory is **self-contained** — copy just the one you need onto its host and follow its README.
 `light/` and `supabase/` also ship an optional container-per-job variant under their `docker/`
@@ -90,6 +91,7 @@ gh-runners/
 ├── supabase/     # Linux, systemd, host has Docker   (+ docker/ container variant)
 ├── android/      # Docker (official ghcr.io/actions/actions-runner) + KVM emulator
 ├── ios/          # macOS, launchd
+├── windows/      # Windows, native actions/runner + Task Scheduler
 ├── render.yaml   # Render Blueprint for broker/ (rootDir: broker)
 ├── .env.{render,pve,mac}.example   # per-target env templates (real ones gitignored)
 ├── README.md  LICENSE  .gitignore  .hadolint.yaml

@@ -46,7 +46,8 @@ sudo ./install.sh --org your-org --access-token github_pat_xxx --user ci
 
 `install.sh` downloads `actions/runner`, sets up the instance dir under `--runner-base` (default
 `/opt/gh-runner-supabase/<i>`), writes `config.env` (mode 600), installs the `gh-runner@.service`
-systemd template, and enables `gh-runner@1 .. gh-runner@N`. Flags are identical to
+template as `gh-runner-supabase@.service` (per-type name prevents collision when light and supabase
+runners share a host), and enables `gh-runner-supabase@1 .. gh-runner-supabase@N`. Flags are identical to
 [`../light`](../light/README.md) (incl. `--owner`; the only different defaults are labels, `--count 1`,
 and the base dir).
 
@@ -78,9 +79,9 @@ hosted runners — it's the *running* stacks you must clean, not the image cache
 
 ## Operate
 ```bash
-systemctl status 'gh-runner@*'
-journalctl -u 'gh-runner@1' -f
-systemctl disable --now gh-runner@1   # offline (deregisters via SIGTERM trap)
+systemctl status 'gh-runner-supabase@*'
+journalctl -u 'gh-runner-supabase@1' -f
+systemctl disable --now gh-runner-supabase@1   # offline (deregisters via SIGTERM trap)
 ```
 
 ## Uninstall
