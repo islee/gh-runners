@@ -1,4 +1,4 @@
 # Dev/CI-only deps. Runtime deps live in requirements.txt.
 -r requirements.txt
-pytest>=8,<9
-ruff>=0.6,<1
+pytest>=9.1.1,<10
+ruff>=0.15.19,<1
