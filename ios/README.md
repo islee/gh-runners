@@ -67,6 +67,7 @@ code, write issues, or access repository secrets.
   --owner my-mac \                          # <id> in the runner name gh-runner-ios-<id>-1
   --labels "self-hosted,mobile,ios,android" \
   --runner-dir ~/actions-runner-e2e \
+  --service-label com.acme.gh-runner \      # optional: customize the LaunchAgent label
   --allow-battery       # not recommended; see Battery section below
 ```
 
@@ -85,10 +86,33 @@ The runner starts immediately and re-registers for each job automatically.
 
 ## Customizing the launchd label
 
-The default LaunchAgent label is `com.example.gh-runner`. If you deploy multiple
-runners on the same Mac, or want to match your team's domain, edit the
-`PLIST_LABEL` constant in `install.sh` and the `<string>` in
-`com.example.gh-runner.plist` before running the installer.
+The default LaunchAgent label is `com.example.gh-runner`. Pass `--service-label`
+(or set `SERVICE_LABEL` in the environment) to override it without editing any file:
+
+```bash
+./install.sh --org your-org --access-token ghp_... \
+  --service-label com.acme.gh-runner
+```
+
+Use a unique reverse-DNS label per runner type on the same Mac to avoid launchd
+collisions. The template source file (`com.example.gh-runner.plist`) is not renamed;
+only the `Label` value and the installed plist filename reflect your chosen label.
+
+`uninstall.sh` accepts the same flag — pass the same label you used at install time:
+
+```bash
+./uninstall.sh --service-label com.acme.gh-runner
+```
+
+## Idempotent reinstall
+
+The installer is safe to re-run. On each invocation it:
+
+- Overwrites `config.env` with the latest credentials and settings.
+- Skips re-downloading the runner binary if the same version is already present.
+- Clears stale local registration files (`.runner`, `.credentials`, `.credentials_rsaparams`)
+  so `config.sh` starts clean — no "already configured" error on reinstall.
+- Reloads the launchd agent (bootout + bootstrap) so config changes take effect immediately.
 
 ---
 
@@ -97,6 +121,7 @@ runners on the same Mac, or want to match your team's domain, edit the
 ### Pause (go offline — runner won't pick up new jobs)
 
 ```bash
+# Replace com.example.gh-runner with your --service-label value if you customized it.
 launchctl bootout gui/$(id -u)/com.example.gh-runner
 ```
 
@@ -127,7 +152,7 @@ To allow the runner to work on battery (e.g. Mac mini, always plugged in):
 # At install time
 ./install.sh ... --allow-battery
 
-# Or edit config.env manually, then restart:
+# Or edit config.env manually, then restart (substitute your --service-label if customized):
 echo 'ALLOW_BATTERY=1' >> ~/actions-runner-e2e/config.env
 launchctl bootout   gui/$(id -u)/com.example.gh-runner
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.example.gh-runner.plist

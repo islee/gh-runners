@@ -33,16 +33,15 @@ readonly DEFAULT_RUNNER_VERSION="2.335.1"
 readonly DEFAULT_ORG="your-org"
 readonly DEFAULT_LABELS="self-hosted,mobile,ios,android"
 readonly DEFAULT_RUNNER_DIR="${HOME}/actions-runner-e2e"
-# NOTE: com.example.gh-runner follows reverse-DNS convention. Customize this label to match your
-# team's domain (e.g. com.acme.gh-runner) before deploying at scale — it uniquely identifies the
-# LaunchAgent in launchd and must not collide with other LaunchAgents on the same machine.
-readonly PLIST_LABEL="com.example.gh-runner"
-readonly PLIST_NAME="${PLIST_LABEL}.plist"
-PLIST_SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/${PLIST_NAME}"
-readonly PLIST_SRC
-readonly PLIST_DST="${HOME}/Library/LaunchAgents/${PLIST_NAME}"
+# NOTE: the source template file is always com.example.gh-runner.plist; the Label inside it is
+# substituted to SERVICE_LABEL at install time so multiple runners can coexist on one Mac.
+# The default follows reverse-DNS convention; override via --service-label or SERVICE_LABEL env.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly SCRIPT_DIR
+# PLIST_SRC points to the fixed template filename; PLIST_DST is derived from SERVICE_LABEL after
+# argument parsing so it reflects any --service-label override.
+PLIST_SRC="${SCRIPT_DIR}/com.example.gh-runner.plist"
+readonly PLIST_SRC
 readonly LOG_DIR="${HOME}/Library/Logs"
 
 # ---------------------------------------------------------------------------
@@ -63,6 +62,10 @@ RUNNER_VERSION="${RUNNER_VERSION:-${DEFAULT_RUNNER_VERSION}}"
 ALLOW_BATTERY="${ALLOW_BATTERY:-0}"
 # <id> segment of the gh-runner-<type>-<id>-<n> name; default the host short name, override --owner.
 OWNER="${OWNER:-$(hostname -s)}"
+# LaunchAgent label — reverse-DNS form uniquely identifies this agent in launchd. Override via
+# --service-label or SERVICE_LABEL env to avoid collisions when running multiple runner types on
+# the same Mac (e.g. com.acme.gh-runner). The template source file is always com.example.gh-runner.plist.
+SERVICE_LABEL="${SERVICE_LABEL:-com.example.gh-runner}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -76,15 +79,24 @@ while [[ $# -gt 0 ]]; do
     --runner-dir)     RUNNER_DIR="$2";       shift 2 ;;
     --runner-version) RUNNER_VERSION="$2";   shift 2 ;;
     --allow-battery)  ALLOW_BATTERY=1;       shift ;;
+    --service-label)  SERVICE_LABEL="$2";    shift 2 ;;
     *)
       echo "Unknown flag: $1" >&2
       echo "Usage: $0 [--org ORG] [--token TOKEN|--broker-url URL [--broker-secret SECRET]|--access-token PAT]" >&2
       echo "          [--labels LABELS] [--runner-dir DIR] [--runner-version VERSION]" >&2
-      echo "          [--allow-battery]" >&2
+      echo "          [--service-label LABEL] [--allow-battery]" >&2
       exit 1
       ;;
   esac
 done
+
+# Derive the launchd label constants after argument parsing so --service-label takes effect.
+PLIST_LABEL="${SERVICE_LABEL}"
+readonly PLIST_LABEL
+PLIST_NAME="${PLIST_LABEL}.plist"
+readonly PLIST_NAME
+PLIST_DST="${HOME}/Library/LaunchAgents/${PLIST_NAME}"
+readonly PLIST_DST
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -221,6 +233,15 @@ else
   info "actions/runner v${RUNNER_VERSION} installed."
 fi
 
+# WHY: config.sh refuses to register ("already configured") if stale local registration files
+# (.runner + .credentials*) from a previous install exist in RUNNER_DIR. Clearing them here makes
+# reinstall idempotent. Safe because every cycle re-registers fresh with --replace/--ephemeral;
+# the only side effect is a prior entry may linger as OFFLINE in GitHub until GitHub prunes it.
+if [[ -f "${RUNNER_DIR}/.runner" || -f "${RUNNER_DIR}/.credentials" || -f "${RUNNER_DIR}/.credentials_rsaparams" ]]; then
+  info "Clearing stale local runner registration files in ${RUNNER_DIR} (idempotent reinstall)."
+  rm -f "${RUNNER_DIR}/.runner" "${RUNNER_DIR}/.credentials" "${RUNNER_DIR}/.credentials_rsaparams"
+fi
+
 # ---------------------------------------------------------------------------
 # 5. Install runner-loop.sh into the runner dir (make it launchd-reachable)
 # ---------------------------------------------------------------------------
@@ -244,9 +265,10 @@ info "Installing ${PLIST_NAME} -> ${PLIST_DST}"
 
 mkdir -p "${HOME}/Library/LaunchAgents"
 
-# WHY: the plist ships with placeholder paths that must reflect the actual RUNNER_DIR and HOME at
-# install time. sed rewrites them in-place to produce a concrete plist.
+# WHY: the plist ships with placeholder paths and label that must reflect the actual RUNNER_DIR,
+# HOME, and chosen service label at install time. sed rewrites them to produce a concrete plist.
 sed \
+  -e "s|__SERVICE_LABEL__|${SERVICE_LABEL}|g" \
   -e "s|__RUNNER_DIR__|${RUNNER_DIR}|g" \
   -e "s|__LOG_DIR__|${LOG_DIR}|g" \
   "${PLIST_SRC}" > "${PLIST_DST}"
@@ -283,7 +305,7 @@ echo " The runner is now running via launchd and will start on"
 echo " login. It registers fresh with GitHub for each job."
 echo ""
 echo " To pause (go offline):"
-echo "   launchctl bootout gui/$(id -u)/${PLIST_LABEL}"
+echo "   launchctl bootout gui/$(id -u)/${SERVICE_LABEL}"
 echo ""
 echo " To resume:"
 echo "   launchctl bootstrap gui/$(id -u) ${PLIST_DST}"

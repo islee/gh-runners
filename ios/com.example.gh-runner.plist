@@ -4,23 +4,25 @@
 <!--
   com.example.gh-runner.plist — LaunchAgent for the iOS/Android-on-Mac self-hosted runner.
 
-  IMPORTANT: This file is a TEMPLATE. install.sh performs two sed substitutions before
+  IMPORTANT: This file is a TEMPLATE. install.sh performs three sed substitutions before
   writing to ~/Library/LaunchAgents/:
-    __RUNNER_DIR__  -> absolute path of the runner install dir (default: ~/actions-runner-e2e,
-                       expanded to the real path by install.sh — e.g. /Users/alice/actions-runner-e2e)
-    __LOG_DIR__     -> absolute path of the log dir (default: ~/Library/Logs, expanded likewise)
+    __SERVICE_LABEL__ -> the LaunchAgent label (default: com.example.gh-runner; set via
+                         --service-label or SERVICE_LABEL env at install time)
+    __RUNNER_DIR__    -> absolute path of the runner install dir (default: ~/actions-runner-e2e,
+                         expanded to the real path by install.sh — e.g. /Users/alice/actions-runner-e2e)
+    __LOG_DIR__       -> absolute path of the log dir (default: ~/Library/Logs, expanded likewise)
 
   Do not load this template directly; always go through install.sh.
 
-  NOTE: customize the Label below to match your team's reverse-DNS domain
-  (e.g. com.acme.gh-runner) if deploying multiple runners on the same machine.
+  NOTE: pass --service-label com.yourteam.gh-runner to install.sh to customize the label
+  (e.g. com.acme.gh-runner). The template filename is always com.example.gh-runner.plist.
 
   KeepAlive=true causes launchd to restart runner-loop.sh if it exits unexpectedly.
   runner-loop.sh itself loops forever; a clean exit only happens via uninstall.sh.
 -->
 <dict>
   <key>Label</key>
-  <string>com.example.gh-runner</string>
+  <string>__SERVICE_LABEL__</string>
 
   <key>ProgramArguments</key>
   <array>

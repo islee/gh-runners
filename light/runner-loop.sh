@@ -146,7 +146,12 @@ while true; do
       --labels "${RUNNER_LABELS}" \
       --name "${RUNNER_NAME}"; then
     warn "config.sh failed — will retry in ${REGISTRATION_RETRY_SECONDS}s."
-    _CURRENT_REG_TOKEN=""; sleep "${REGISTRATION_RETRY_SECONDS}"; continue
+    _CURRENT_REG_TOKEN=""
+    # WHY: config.sh fails with "already configured" when stale local registration files (.runner,
+    # .credentials*) remain from a prior cycle or reinstall. Clearing them self-heals the loop.
+    # A prior registration may linger OFFLINE in GitHub until pruned or the next --replace cycle.
+    rm -f "${RUNNER_DIR}/.runner" "${RUNNER_DIR}/.credentials" "${RUNNER_DIR}/.credentials_rsaparams" || true
+    sleep "${REGISTRATION_RETRY_SECONDS}"; continue
   fi
 
   log "Runner registered as ${RUNNER_NAME}. Waiting for a job..."

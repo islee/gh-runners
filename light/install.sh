@@ -112,6 +112,15 @@ for i in $(seq 1 "${COUNT}"); do
   mkdir -p "${INST_DIR}"
   tar -xzf "${TMP_TGZ}" -C "${INST_DIR}"
 
+  # WHY: config.sh refuses to register ("already configured") if stale local registration files
+  # from a previous install exist in the instance dir. Clearing them makes reinstall idempotent.
+  # Safe because every cycle re-registers fresh with --replace/--ephemeral; a prior entry may
+  # linger as OFFLINE in GitHub until GitHub prunes it.
+  if [[ -f "${INST_DIR}/.runner" || -f "${INST_DIR}/.credentials" || -f "${INST_DIR}/.credentials_rsaparams" ]]; then
+    info "Clearing stale local runner registration files in ${INST_DIR} (idempotent reinstall)."
+    rm -f "${INST_DIR}/.runner" "${INST_DIR}/.credentials" "${INST_DIR}/.credentials_rsaparams"
+  fi
+
   # config.env — create mode 600 BEFORE writing any credential (no world-readable window).
   CONFIG_ENV="${INST_DIR}/config.env"
   install -m 600 -o "${RUN_USER}" /dev/null "${CONFIG_ENV}"

@@ -16,10 +16,11 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 
 readonly DEFAULT_RUNNER_DIR="${HOME}/actions-runner-e2e"
-readonly PLIST_LABEL="com.example.gh-runner"
-readonly PLIST_DST="${HOME}/Library/LaunchAgents/${PLIST_LABEL}.plist"
 
 RUNNER_DIR="${RUNNER_DIR:-${DEFAULT_RUNNER_DIR}}"
+# LaunchAgent label — must match the value used at install time (--service-label / SERVICE_LABEL).
+# Default matches install.sh's default; override if you installed with a custom label.
+SERVICE_LABEL="${SERVICE_LABEL:-com.example.gh-runner}"
 PURGE=0
 YES=0   # skip interactive prompts
 
@@ -29,16 +30,21 @@ YES=0   # skip interactive prompts
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --runner-dir) RUNNER_DIR="$2"; shift 2 ;;
-    --purge)      PURGE=1;         shift ;;
-    --yes)        YES=1;           shift ;;
+    --runner-dir)     RUNNER_DIR="$2";    shift 2 ;;
+    --service-label)  SERVICE_LABEL="$2"; shift 2 ;;
+    --purge)          PURGE=1;            shift ;;
+    --yes)            YES=1;              shift ;;
     *)
       echo "Unknown flag: $1" >&2
-      echo "Usage: $0 [--runner-dir DIR] [--purge] [--yes]" >&2
+      echo "Usage: $0 [--runner-dir DIR] [--service-label LABEL] [--purge] [--yes]" >&2
       exit 1
       ;;
   esac
 done
+
+# Derive plist path from the (possibly overridden) service label.
+PLIST_LABEL="${SERVICE_LABEL}"
+PLIST_DST="${HOME}/Library/LaunchAgents/${PLIST_LABEL}.plist"
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -59,6 +65,18 @@ if [[ -f "${PLIST_DST}" ]]; then
   info "Plist removed: ${PLIST_DST}"
 else
   warn "Plist not found at ${PLIST_DST} — skipping unload."
+fi
+
+# ---------------------------------------------------------------------------
+# 1b. Clear stale local runner registration files
+# ---------------------------------------------------------------------------
+
+# WHY: removes the local registration state so a future reinstall into the same dir starts clean.
+# config.sh errors "already configured" if these exist — clearing them here is safe because the
+# runner is about to be removed and will re-register fresh on next install.
+if [[ -f "${RUNNER_DIR}/.runner" || -f "${RUNNER_DIR}/.credentials" || -f "${RUNNER_DIR}/.credentials_rsaparams" ]]; then
+  info "Clearing local runner registration files in ${RUNNER_DIR}."
+  rm -f "${RUNNER_DIR}/.runner" "${RUNNER_DIR}/.credentials" "${RUNNER_DIR}/.credentials_rsaparams" || true
 fi
 
 # ---------------------------------------------------------------------------
