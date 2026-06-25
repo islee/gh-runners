@@ -17,6 +17,10 @@ Wants=network-online.target
 Type=simple
 User=__RUN_USER__
 WorkingDirectory=__RUNNER_BASE__/%i
+# The runner derives RUNNER_TOOL_CACHE from AGENT_TOOLSDIRECTORY, so setup-python/-node/-deno resolve
+# tools from a shared, persistent cache (hosted-runner parity). REQUIRED for setup-python on
+# non-Ubuntu hosts, which can't download a prebuilt Python. install.sh substitutes the path.
+Environment=AGENT_TOOLSDIRECTORY=__TOOLCACHE_DIR__
 ExecStart=/bin/bash __RUNNER_BASE__/%i/runner-loop.sh
 Restart=always
 RestartSec=10

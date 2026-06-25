@@ -12,9 +12,12 @@ ARG BASE_IMAGE=ghcr.io/actions/actions-runner:latest
 FROM ${BASE_IMAGE}
 
 USER root
-# docker CLI via the official Docker apt repo, plus the entrypoint deps.
+# docker CLI via the official Docker apt repo, plus the entrypoint deps (curl, jq) and the
+# hosted-runner job baseline the official image lacks. The Ubuntu base already has
+# unzip/lsb_release/python3 (setup-deno/setup-python work via download), but is missing zip + the
+# actions/cache compressors (xz-utils, zstd) — add them for parity.
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends curl jq ca-certificates gnupg && \
+    apt-get install -y --no-install-recommends curl jq ca-certificates gnupg zip xz-utils zstd postgresql-client && \
     install -m 0755 -d /etc/apt/keyrings && \
     curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc && \
     chmod a+r /etc/apt/keyrings/docker.asc && \
