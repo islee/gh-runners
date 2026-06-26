@@ -229,7 +229,7 @@ class SupabaseStatsStore:
       runner_stats_meta  — single row (id=1) holding the since timestamp
       record_runner_event(p_dimension, p_key, p_kind, p_ts) — upsert helper
 
-    record() fires two concurrent RPC calls (one for "type" dimension, one for "host").
+    record() fires three concurrent RPC calls (dimensions "type", "host", and "runner").
     Persistence is best-effort: record() swallows all errors rather than failing the hot path.
 
     `http` is an injectable async callable (method, path, *, json=None, params=None) -> parsed JSON
@@ -280,6 +280,7 @@ class SupabaseStatsStore:
         """Record a token/remove-token event. Best-effort: never raises on failure."""
         try:
             rtype, host = parse_runner_name(name)
+            runner = name or "unknown"
             ts_iso = datetime.fromtimestamp(int(self._clock()), tz=timezone.utc).isoformat()
             await asyncio.gather(
                 self._request(
@@ -291,6 +292,11 @@ class SupabaseStatsStore:
                     "POST",
                     "/rest/v1/rpc/record_runner_event",
                     json={"p_dimension": "host", "p_key": host, "p_kind": kind, "p_ts": ts_iso},
+                ),
+                self._request(
+                    "POST",
+                    "/rest/v1/rpc/record_runner_event",
+                    json={"p_dimension": "runner", "p_key": runner, "p_kind": kind, "p_ts": ts_iso},
                 ),
             )
         except Exception:
@@ -317,6 +323,7 @@ class SupabaseStatsStore:
 
             by_type: dict[str, dict] = {}
             by_host: dict[str, dict] = {}
+            by_runner: dict[str, dict] = {}
 
             for row in rows:
                 dim = row.get("dimension")
@@ -329,12 +336,32 @@ class SupabaseStatsStore:
                     target = by_type
                 elif dim == "host":
                     target = by_host
+                elif dim == "runner":
+                    target = by_runner
                 else:
                     continue
 
                 e = target.setdefault(key, {"token": 0, "remove-token": 0, "last_seen": None})
                 e[kind] = count
                 e["last_seen"] = last_seen
+
+            # Flatten per-runner buckets into a list, deriving type/host from each name, sorted
+            # most-recently-active first (mirrors the Redis/memory "runners" shape).
+            runners = sorted(
+                (
+                    {
+                        "name": name,
+                        "type": parse_runner_name(name)[0],
+                        "host": parse_runner_name(name)[1],
+                        "token": e["token"],
+                        "remove-token": e["remove-token"],
+                        "last_seen": e["last_seen"],
+                    }
+                    for name, e in by_runner.items()
+                ),
+                key=lambda x: x["last_seen"] or "",
+                reverse=True,
+            )
 
             totals = {
                 "token": sum(e["token"] for e in by_type.values()),
@@ -350,6 +377,7 @@ class SupabaseStatsStore:
                 "totals": totals,
                 "by_type": by_type,
                 "by_host": by_host,
+                "runners": runners,
             }
         except Exception as e:
             return {"backend": self.backend, "durable": self.durable, "error": str(e)}
@@ -358,12 +386,18 @@ class SupabaseStatsStore:
 class RedisStatsStore:
     """Durable activity counter store backed by Upstash Redis REST API.
 
-    Uses a five-key schema in Redis:
-      ghr:count:type  — HASH of "<type>:<kind>" -> int (token / remove-token counts per runner type)
-      ghr:count:host  — HASH of "<host>:<kind>" -> int (same, per host)
-      ghr:last:type   — HASH of "<type>" -> epoch-second timestamp (most recent activity)
-      ghr:last:host   — HASH of "<host>" -> epoch-second timestamp
-      ghr:since       — STRING epoch-second of the first ever recorded event (set once via NX)
+    Uses a seven-key schema in Redis:
+      ghr:count:type    — HASH of "<type>:<kind>" -> int (token / remove-token counts per runner type)
+      ghr:count:host    — HASH of "<host>:<kind>" -> int (same, per host)
+      ghr:count:runner  — HASH of "<name>:<kind>" -> int (same, per individual runner name)
+      ghr:last:type     — HASH of "<type>" -> epoch-second timestamp (most recent activity)
+      ghr:last:host     — HASH of "<host>" -> epoch-second timestamp
+      ghr:last:runner   — HASH of "<name>" -> epoch-second timestamp
+      ghr:since         — STRING epoch-second of the first ever recorded event (set once via NX)
+
+    The runner dimension keys on the full ephemeral name (bounded: names are fixed per instance,
+    `gh-runner-<type>-<id>-<n>`), giving a per-runner registration-cycle count — the broker's best
+    proxy for "work done" (it mints one token per ephemeral job cycle; it never sees the job itself).
 
     All Redis I/O is pipelined to a single HTTP request via the Upstash REST /pipeline endpoint.
     Persistence is best-effort: record() swallows all errors rather than failing the hot path.
@@ -404,13 +438,16 @@ class RedisStatsStore:
         """Record a token/remove-token event. Best-effort: never raises on failure."""
         try:
             rtype, host = parse_runner_name(name)
+            runner = name or "unknown"
             ts = int(self._clock())
             await self._pipeline(
                 [
                     ["HINCRBY", "ghr:count:type", f"{rtype}:{kind}", 1],
                     ["HINCRBY", "ghr:count:host", f"{host}:{kind}", 1],
+                    ["HINCRBY", "ghr:count:runner", f"{runner}:{kind}", 1],
                     ["HSET", "ghr:last:type", rtype, ts],
                     ["HSET", "ghr:last:host", host, ts],
+                    ["HSET", "ghr:last:runner", runner, ts],
                     ["SET", "ghr:since", ts, "NX"],
                 ]
             )
@@ -424,12 +461,22 @@ class RedisStatsStore:
                 [
                     ["HGETALL", "ghr:count:type"],
                     ["HGETALL", "ghr:count:host"],
+                    ["HGETALL", "ghr:count:runner"],
                     ["HGETALL", "ghr:last:type"],
                     ["HGETALL", "ghr:last:host"],
+                    ["HGETALL", "ghr:last:runner"],
                     ["GET", "ghr:since"],
                 ]
             )
-            count_type_raw, count_host_raw, last_type_raw, last_host_raw, since_raw = results
+            (
+                count_type_raw,
+                count_host_raw,
+                count_runner_raw,
+                last_type_raw,
+                last_host_raw,
+                last_runner_raw,
+                since_raw,
+            ) = results
 
             def _flat_to_dict(flat: list | None) -> dict[str, str]:
                 """Upstash returns HGETALL as a flat [field, value, field, value, ...] array."""
@@ -440,8 +487,10 @@ class RedisStatsStore:
 
             count_type = _flat_to_dict(count_type_raw)
             count_host = _flat_to_dict(count_host_raw)
+            count_runner = _flat_to_dict(count_runner_raw)
             last_type = _flat_to_dict(last_type_raw)
             last_host = _flat_to_dict(last_host_raw)
+            last_runner = _flat_to_dict(last_runner_raw)
 
             def _build_group(counts: dict[str, str], lasts: dict[str, str]) -> dict:
                 """Accumulate counts by entity, overlay last_seen timestamps."""
@@ -459,6 +508,25 @@ class RedisStatsStore:
 
             by_type = _build_group(count_type, last_type)
             by_host = _build_group(count_host, last_host)
+            by_runner = _build_group(count_runner, last_runner)
+
+            # Flatten the per-runner group into a list, deriving type/host from each name, sorted
+            # most-recently-active first (mirrors the in-memory RunnerStats.snapshot() "runners" shape).
+            runners = sorted(
+                (
+                    {
+                        "name": name,
+                        "type": parse_runner_name(name)[0],
+                        "host": parse_runner_name(name)[1],
+                        "token": e["token"],
+                        "remove-token": e["remove-token"],
+                        "last_seen": e["last_seen"],
+                    }
+                    for name, e in by_runner.items()
+                ),
+                key=lambda x: x["last_seen"] or "",
+                reverse=True,
+            )
 
             totals = {
                 "token": sum(e["token"] for e in by_type.values()),
@@ -474,6 +542,7 @@ class RedisStatsStore:
                 "totals": totals,
                 "by_type": by_type,
                 "by_host": by_host,
+                "runners": runners,
             }
         except Exception as e:
             return {"backend": self.backend, "durable": self.durable, "error": str(e)}
