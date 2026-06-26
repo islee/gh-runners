@@ -1,7 +1,8 @@
 # Systemd template unit for an ephemeral GitHub Actions runner (vanilla actions/runner).
 #
-# This is a TEMPLATE: install.sh sed-substitutes __RUNNER_BASE__, __RUN_USER__, and
-# __TOOLCACHE_DIR__ and writes the result to /etc/systemd/system/gh-runner-light@.service
+# This is a TEMPLATE: install.sh sed-substitutes __RUNNER_BASE__, __RUN_USER__, __TOOLCACHE_DIR__,
+# and __PLAYWRIGHT_ENV__ (empty unless --with-playwright) and writes the result to
+# /etc/systemd/system/gh-runner-light@.service
 # (per-type name — avoids collision when light and supabase runners share a host), then enables
 # one instance per runner dir (gh-runner-light@1, gh-runner-light@2, ...). Each instance %i maps
 # to __RUNNER_BASE__/%i, which holds its own actions/runner install + config.env + fleet scripts.
@@ -29,6 +30,9 @@ WorkingDirectory=__RUNNER_BASE__/%i
 # tools from a shared, persistent cache (hosted-runner parity). REQUIRED for setup-python on
 # non-Ubuntu hosts, which can't download a prebuilt Python. install.sh substitutes the path.
 Environment=AGENT_TOOLSDIRECTORY=__TOOLCACHE_DIR__
+# Playwright capability (only when installed with --with-playwright): points every job at a shared,
+# persistent browser cache so `playwright install` is a cache hit and needs no root. Blank otherwise.
+__PLAYWRIGHT_ENV__
 ExecStart=/bin/bash __RUNNER_BASE__/%i/runner-bootstrap.sh
 Restart=always
 RestartSec=10
