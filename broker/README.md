@@ -45,12 +45,14 @@ the repo-root `.github/workflows/ci.yml`.)
 ## Endpoints
 | Method | Path | Auth | Returns |
 |--------|------|------|---------|
-| `POST` | `/token` | `Bearer $BROKER_SECRET` | `{"token","expires_at","url"}` registration token |
+| `POST` | `/token` | `Bearer $BROKER_SECRET` | `{"token","expires_at","url"[,"fleet_update"]}` registration token |
 | `POST` | `/remove-token` | `Bearer $BROKER_SECRET` | `{"token","expires_at"}` |
 | `GET` | `/stats` | `Bearer $BROKER_SECRET` | recent token activity by type / host / runner |
 | `GET` | `/health` | none | `{"ok":true}` |
 
 Optional `X-Runner-Name` header is logged for attribution **and feeds `/stats`** (see below).
+Optional `X-Fleet-Version` header reports the runner's current fleet-code version — logged and
+surfaced in `/stats.activity.runners[].fleet_version`. See **Fleet self-update trust anchor** below.
 
 > **Labels are NOT enforceable by this service.** A runner self-assigns its labels at `config.sh
 > --labels` time; they are not encoded in the registration token, so the broker cannot restrict them.
@@ -134,6 +136,76 @@ Window = `RUNNER_STATS_WINDOW_SECONDS` (default 24 h); ring-buffer cap = `RUNNER
 
 **Auth-gated** because it exposes fleet topology (types, hosts, runner names). A runner name that
 doesn't fit `gh-runner-<type>-<id>-<n>` is bucketed as type `unknown`.
+
+## Fleet self-update trust anchor
+
+The broker is the **out-of-repo trust anchor** for the fleet self-update feature
+([`docs/fleet-self-update.md`](../docs/fleet-self-update.md)). It tells each runner which ref
+to track and the expected manifest hash — both anchored in the broker rather than in the repo
+itself, so an attacker who can write a GitHub ref cannot forge an update unilaterally.
+
+### How it works
+
+When `FLEET_DESIRED_REF` is set and `FLEET_MANIFEST_SHA256` maps the runner's type to a sha256:
+
+1. The runner sends `X-Fleet-Version: <local manifest version>` in the `/token` request (the
+   existing call it already makes each cycle — no extra request added).
+2. The broker logs the reported version for fleet observability and adds `fleet_update` to the
+   `/token` response:
+
+```jsonc
+{
+  "token": "...",
+  "expires_at": "...",
+  "url": "https://github.com/<org>",
+  "fleet_update": {
+    "desired_ref": "v2026.06.26.1",
+    "manifest_sha256": "<hex sha256 of .fleet-manifest for this runner type>",
+    "min_version": "2026.06.26.1"   // null when FLEET_MIN_VERSION is unset
+  }
+}
+```
+
+3. The runner fetches the manifest from GitHub at `desired_ref`, verifies its sha256 against
+   `manifest_sha256`, and applies the update only when the hashes match.
+
+When `FLEET_DESIRED_REF` is unset (default) the broker behaves exactly as before — no
+`fleet_update` key in the response and no behaviour change for runners that predate this feature.
+
+### New request header
+
+| Header | Direction | Purpose |
+|--------|-----------|---------|
+| `X-Fleet-Version` | runner → broker | Current fleet-code version on the runner; logged and stored in `/stats.activity.runners[].fleet_version`. |
+
+### Fleet-version observability in `/stats`
+
+Each runner entry in `activity.runners[]` gains an optional `fleet_version` field whenever the
+runner has sent `X-Fleet-Version` at least once:
+
+```jsonc
+"runners": [
+  {
+    "name": "gh-runner-light-ci-linple-1",
+    "type": "light",
+    "fleet_version": "2026.06.26.1",   // present once runner has self-reported its version
+    ...
+  }
+]
+```
+
+Supported by both the in-memory and Upstash Redis backends. Supabase backend accepts the field
+but does not persist it (requires a schema migration — see `supabase_stats.sql` TODO).
+
+### Env vars (all optional)
+
+See [`env.example`](env.example) for the full reference with comments. In brief:
+
+| Var | Purpose |
+|-----|---------|
+| `FLEET_DESIRED_REF` | Git tag runners should track (e.g. `v2026.06.26.1`). Feature dormant when unset. |
+| `FLEET_MANIFEST_SHA256` | JSON object `{"light":"<hex>","supabase":"<hex>","ios":"<hex>"}` mapping runner type → sha256 of its `.fleet-manifest`. Computed by `release.sh`. |
+| `FLEET_MIN_VERSION` | Advisory floor string passed through to runners. Never forces an update. |
 
 ## Credentials & security
 

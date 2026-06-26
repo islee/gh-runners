@@ -1,10 +1,15 @@
 # Systemd template unit for an ephemeral GitHub Actions runner (vanilla actions/runner).
 #
-# This is a TEMPLATE: install.sh sed-substitutes __RUNNER_BASE__ and __RUN_USER__ and writes the
-# result to /etc/systemd/system/gh-runner-supabase@.service (per-type name — avoids collision when
-# light and supabase runners share a host), then enables one instance per runner dir
-# (gh-runner-supabase@1, gh-runner-supabase@2, ...). Each instance %i maps to __RUNNER_BASE__/%i,
-# which holds its own actions/runner install + config.env (mode 600) + runner-loop.sh.
+# This is a TEMPLATE: install.sh sed-substitutes __RUNNER_BASE__, __RUN_USER__, and
+# __TOOLCACHE_DIR__ and writes the result to /etc/systemd/system/gh-runner-supabase@.service
+# (per-type name — avoids collision when light and supabase runners share a host), then enables
+# one instance per runner dir (gh-runner-supabase@1, gh-runner-supabase@2, ...). Each instance
+# %i maps to __RUNNER_BASE__/%i, which holds its own actions/runner install + config.env + fleet
+# scripts.
+#
+# ExecStart targets runner-bootstrap.sh (NOT runner-loop.sh directly). The bootstrap is the
+# stable supervisor entrypoint that manages the crash counter and last_good/ rollback; it exec's
+# runner-loop.sh as the swappable payload. Fleet-code updates only touch the payload.
 #
 # Do not install this template by hand; run install.sh.
 
@@ -12,6 +17,10 @@
 Description=Ephemeral GitHub Actions runner (instance %i)
 After=network-online.target
 Wants=network-online.target
+# WHY: disable the start-rate-limiter so systemd cannot mark the unit failed and stop relaunches
+# before runner-bootstrap.sh's crash counter reaches ROLLBACK_THRESHOLD and triggers last_good/
+# restore. RestartSec=10 in [Service] still throttles rapid restarts.
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -21,7 +30,7 @@ WorkingDirectory=__RUNNER_BASE__/%i
 # tools from a shared, persistent cache (hosted-runner parity). REQUIRED for setup-python on
 # non-Ubuntu hosts, which can't download a prebuilt Python. install.sh substitutes the path.
 Environment=AGENT_TOOLSDIRECTORY=__TOOLCACHE_DIR__
-ExecStart=/bin/bash __RUNNER_BASE__/%i/runner-loop.sh
+ExecStart=/bin/bash __RUNNER_BASE__/%i/runner-bootstrap.sh
 Restart=always
 RestartSec=10
 # Give runner-loop.sh time to deregister (SIGTERM trap) before systemd SIGKILLs it.

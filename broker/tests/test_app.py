@@ -230,6 +230,7 @@ def test_redis_store_snapshot_parses_pipeline_response():
             last_host_flat,
             last_runner_flat,
             since_val,
+            [],  # ghr:fleetver:runner — none recorded in this fixture
         ]
     )
     store = RedisStatsStore(url="https://redis.example.com", token="tok", http=fake)
@@ -407,3 +408,163 @@ def test_stats_endpoint_returns_snapshot_with_auth():
     assert "generated_at" in body
     assert "fleet" in body
     assert "activity" in body
+
+
+# --- fleet self-update channel -------------------------------------------------------------------
+
+
+async def _fake_mint(kind: str) -> dict:
+    """Stand-in for _mint() used by fleet tests; never reaches GitHub."""
+    return {"token": "tok-fake-123", "expires_at": "2026-06-26T12:00:00Z"}
+
+
+def test_fleet_update_absent_when_not_configured(monkeypatch):
+    """/token response has no fleet_update key when FLEET_DESIRED_REF is unset (default)."""
+    monkeypatch.setattr(appmod, "FLEET_DESIRED_REF", None)
+    monkeypatch.setattr(appmod, "_fleet_manifest_map", {})
+    monkeypatch.setattr(appmod, "_mint", _fake_mint)
+
+    r = client.post(
+        "/token",
+        headers={
+            "Authorization": "Bearer test-broker-secret",
+            "X-Runner-Name": "gh-runner-light-host-1",
+        },
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert "token" in body
+    assert "fleet_update" not in body, f"expected no fleet_update; got {body}"
+
+
+def test_fleet_update_present_with_correct_per_type_hash(monkeypatch):
+    """/token includes fleet_update with the right manifest_sha256 for the requesting type."""
+    monkeypatch.setattr(appmod, "FLEET_DESIRED_REF", "v2026.06.26.1")
+    monkeypatch.setattr(
+        appmod,
+        "_fleet_manifest_map",
+        {"light": "aabbccdd11223344", "supabase": "deadbeef99887766"},
+    )
+    monkeypatch.setattr(appmod, "FLEET_MIN_VERSION", "2026.06.26.1")
+    monkeypatch.setattr(appmod, "_mint", _fake_mint)
+
+    # A light runner gets the light hash.
+    r = client.post(
+        "/token",
+        headers={
+            "Authorization": "Bearer test-broker-secret",
+            "X-Runner-Name": "gh-runner-light-host-1",
+        },
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert "fleet_update" in body, f"expected fleet_update in {body}"
+    fu = body["fleet_update"]
+    assert fu["desired_ref"] == "v2026.06.26.1"
+    assert fu["manifest_sha256"] == "aabbccdd11223344"
+    assert fu["min_version"] == "2026.06.26.1"
+
+    # A supabase runner gets supabase's hash.
+    r2 = client.post(
+        "/token",
+        headers={
+            "Authorization": "Bearer test-broker-secret",
+            "X-Runner-Name": "gh-runner-supabase-host-1",
+        },
+    )
+    assert r2.status_code == 200
+    assert r2.json()["fleet_update"]["manifest_sha256"] == "deadbeef99887766"
+
+    # An ios runner has no entry in the map → no fleet_update (not yet enrolled).
+    r3 = client.post(
+        "/token",
+        headers={
+            "Authorization": "Bearer test-broker-secret",
+            "X-Runner-Name": "gh-runner-ios-host-1",
+        },
+    )
+    assert r3.status_code == 200
+    assert "fleet_update" not in r3.json(), f"ios should not get fleet_update: {r3.json()}"
+
+
+def test_fleet_manifest_malformed_json_leaves_feature_dormant(monkeypatch):
+    """When FLEET_MANIFEST_SHA256 was malformed at import time, _fleet_manifest_map stays {}.
+
+    We can't re-exercise the import path directly without reloading the module, so we verify the
+    post-malformed-parse state: FLEET_DESIRED_REF set but empty map → _fleet_update_for returns None.
+    """
+    monkeypatch.setattr(appmod, "FLEET_DESIRED_REF", "v2026.06.26.1")
+    monkeypatch.setattr(appmod, "_fleet_manifest_map", {})  # simulates failed JSON parse
+    assert appmod._fleet_update_for("light") is None
+    assert appmod._fleet_update_for("supabase") is None
+    assert appmod._fleet_update_for("ios") is None
+
+
+def test_fleet_version_surfaces_in_memory_stats_runners():
+    """X-Fleet-Version reported by a runner appears as fleet_version in the memory stats snapshot."""
+    s = RunnerStats(window_s=3600, max_events=100)
+    asyncio.run(s.record("token", "gh-runner-light-host-1", "2026.06.26.1"))
+    snap = asyncio.run(s.snapshot())
+    runner = next(r for r in snap["runners"] if r["name"] == "gh-runner-light-host-1")
+    assert runner.get("fleet_version") == "2026.06.26.1", f"unexpected runner entry: {runner}"
+
+
+def test_fleet_version_absent_in_stats_when_not_reported():
+    """fleet_version key is absent (not null) when runner never sent X-Fleet-Version."""
+    s = RunnerStats(window_s=3600, max_events=100)
+    asyncio.run(s.record("token", "gh-runner-light-host-1"))
+    snap = asyncio.run(s.snapshot())
+    runner = next(r for r in snap["runners"] if r["name"] == "gh-runner-light-host-1")
+    assert "fleet_version" not in runner, f"key should be absent, got: {runner}"
+
+
+def test_redis_store_record_includes_fleetver_command_when_provided():
+    """record() emits an HSET ghr:fleetver:runner command when fleet_version is given."""
+    fake = FakeRedisHttp(results=[1] * 8)
+    store = RedisStatsStore(url="https://redis.example.com", token="tok", http=fake)
+    asyncio.run(store.record("token", "gh-runner-light-my-host-1", "2026.06.26.1"))
+
+    cmds = fake.captured
+    assert any(
+        c[0] == "HSET"
+        and c[1] == "ghr:fleetver:runner"
+        and c[2] == "gh-runner-light-my-host-1"
+        and c[3] == "2026.06.26.1"
+        for c in cmds
+    ), f"missing HSET ghr:fleetver:runner with version in {cmds}"
+
+
+def test_redis_store_record_omits_fleetver_command_when_absent():
+    """record() does NOT emit HSET ghr:fleetver:runner when fleet_version is None."""
+    fake = FakeRedisHttp(results=[1] * 7)
+    store = RedisStatsStore(url="https://redis.example.com", token="tok", http=fake)
+    asyncio.run(store.record("token", "gh-runner-light-my-host-1"))  # no fleet_version
+
+    cmds = fake.captured
+    assert not any(
+        c[1] == "ghr:fleetver:runner" for c in cmds
+    ), f"unexpected ghr:fleetver:runner command in {cmds}"
+
+
+def test_redis_store_snapshot_surfaces_fleet_version_per_runner():
+    """When ghr:fleetver:runner is populated, snapshot includes fleet_version on matching runners."""
+    count_runner_flat = ["gh-runner-light-my-host-1:token", "3"]
+    fleetver_flat = ["gh-runner-light-my-host-1", "2026.06.26.1"]
+
+    fake = FakeRedisHttp(
+        results=[
+            [],                 # count_type
+            [],                 # count_host
+            count_runner_flat,  # count_runner
+            [],                 # last_type
+            [],                 # last_host
+            [],                 # last_runner
+            "1699999999",       # since
+            fleetver_flat,      # fleetver:runner
+        ]
+    )
+    store = RedisStatsStore(url="https://redis.example.com", token="tok", http=fake)
+    snap = asyncio.run(store.snapshot())
+
+    runner = next(r for r in snap["runners"] if r["name"] == "gh-runner-light-my-host-1")
+    assert runner.get("fleet_version") == "2026.06.26.1", f"unexpected runner: {runner}"

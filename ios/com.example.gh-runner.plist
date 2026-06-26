@@ -17,8 +17,14 @@
   NOTE: pass --service-label com.yourteam.gh-runner to install.sh to customize the label
   (e.g. com.acme.gh-runner). The template filename is always com.example.gh-runner.plist.
 
-  KeepAlive=true causes launchd to restart runner-loop.sh if it exits unexpectedly.
-  runner-loop.sh itself loops forever; a clean exit only happens via uninstall.sh.
+  ProgramArguments targets runner-bootstrap.sh (NOT runner-loop.sh directly). The bootstrap is
+  the stable supervisor entrypoint that manages the crash counter and last_good/ rollback; it
+  exec's runner-loop.sh as the swappable payload. Fleet-code updates only touch the payload.
+
+  KeepAlive=true (bare boolean) causes launchd to restart runner-bootstrap.sh on ANY exit,
+  including clean exit 0 (which is how an applied fleet-code update signals the supervisor to
+  relaunch with the new payload). IMPORTANT: a SuccessfulExit=false dict would NOT relaunch
+  on clean exit and would break the update mechanism — do not change this form.
 -->
 <dict>
   <key>Label</key>
@@ -26,10 +32,10 @@
 
   <key>ProgramArguments</key>
   <array>
-    <!-- WHY: invoke bash explicitly so launchd doesn't require runner-loop.sh to be in $PATH.
+    <!-- WHY: invoke bash explicitly so launchd doesn't require runner-bootstrap.sh to be in $PATH.
          LaunchAgent environments have a minimal PATH and may not find the shebang interpreter. -->
     <string>/bin/bash</string>
-    <string>__RUNNER_DIR__/runner-loop.sh</string>
+    <string>__RUNNER_DIR__/runner-bootstrap.sh</string>
   </array>
 
   <!-- Start immediately when the plist is loaded and on every user login. -->
