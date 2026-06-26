@@ -129,7 +129,7 @@ _acquire_reg_token() {
     log "Fetching registration token from broker: $(_mask_url "${BROKER_URL}")"
     REG_TOKEN="$(curl --silent --fail --max-time 15 -X POST \
       -H "Authorization: Bearer ${BROKER_SECRET}" \
-      -H "X-Runner-Name: $(hostname -s)" \
+      -H "X-Runner-Name: ${RUNNER_NAME}" \
       "${BROKER_URL%/}/token" | _json_field token)" || {
       warn "Broker request failed (check BROKER_URL / BROKER_SECRET in config.env)."
       return 1
