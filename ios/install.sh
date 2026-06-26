@@ -8,7 +8,8 @@
 #   ./install.sh [--org ORG] [--token TOKEN | --broker-url URL [--broker-secret SECRET]
 #                             | --access-token PAT]
 #                [--labels LABELS] [--runner-dir DIR] [--runner-version VERSION]
-#                [--allow-battery]
+#                [--allow-battery] [--no-auto-update] [--update-repo SLUG]
+#                [--update-ref REF] [--update-min-interval SECONDS]
 #
 # Credential priority (highest to lowest):
 #   1. --token / RUNNER_TOKEN         Model A: static registration token (onboarding, one-off)
@@ -66,25 +67,34 @@ OWNER="${OWNER:-$(hostname -s)}"
 # --service-label or SERVICE_LABEL env to avoid collisions when running multiple runner types on
 # the same Mac (e.g. com.acme.gh-runner). The template source file is always com.example.gh-runner.plist.
 SERVICE_LABEL="${SERVICE_LABEL:-com.example.gh-runner}"
+AUTO_UPDATE="${AUTO_UPDATE:-1}"
+UPDATE_REPO="${UPDATE_REPO:-islee/gh-runners}"
+UPDATE_REF="${UPDATE_REF:-}"
+UPDATE_MIN_INTERVAL="${UPDATE_MIN_INTERVAL:-300}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --org)            GH_ORG="$2";           shift 2 ;;
-    --owner)          OWNER="$2";            shift 2 ;;
-    --token)          RUNNER_TOKEN="$2";     shift 2 ;;
-    --broker-url)     BROKER_URL="$2";       shift 2 ;;
-    --broker-secret)  BROKER_SECRET="$2";    shift 2 ;;
-    --access-token)   ACCESS_TOKEN="$2";     shift 2 ;;
-    --labels)         RUNNER_LABELS="$2";    shift 2 ;;
-    --runner-dir)     RUNNER_DIR="$2";       shift 2 ;;
-    --runner-version) RUNNER_VERSION="$2";   shift 2 ;;
-    --allow-battery)  ALLOW_BATTERY=1;       shift ;;
-    --service-label)  SERVICE_LABEL="$2";    shift 2 ;;
+    --org)                  GH_ORG="$2";             shift 2 ;;
+    --owner)                OWNER="$2";              shift 2 ;;
+    --token)                RUNNER_TOKEN="$2";       shift 2 ;;
+    --broker-url)           BROKER_URL="$2";         shift 2 ;;
+    --broker-secret)        BROKER_SECRET="$2";      shift 2 ;;
+    --access-token)         ACCESS_TOKEN="$2";       shift 2 ;;
+    --labels)               RUNNER_LABELS="$2";      shift 2 ;;
+    --runner-dir)           RUNNER_DIR="$2";         shift 2 ;;
+    --runner-version)       RUNNER_VERSION="$2";     shift 2 ;;
+    --allow-battery)        ALLOW_BATTERY=1;         shift ;;
+    --service-label)        SERVICE_LABEL="$2";      shift 2 ;;
+    --no-auto-update)       AUTO_UPDATE="0";         shift ;;
+    --update-repo)          UPDATE_REPO="$2";        shift 2 ;;
+    --update-ref)           UPDATE_REF="$2";         shift 2 ;;
+    --update-min-interval)  UPDATE_MIN_INTERVAL="$2"; shift 2 ;;
     *)
       echo "Unknown flag: $1" >&2
       echo "Usage: $0 [--org ORG] [--token TOKEN|--broker-url URL [--broker-secret SECRET]|--access-token PAT]" >&2
       echo "          [--labels LABELS] [--runner-dir DIR] [--runner-version VERSION]" >&2
       echo "          [--service-label LABEL] [--allow-battery]" >&2
+      echo "          [--no-auto-update] [--update-repo SLUG] [--update-ref REF] [--update-min-interval SECS]" >&2
       exit 1
       ;;
   esac
@@ -192,8 +202,12 @@ install -m 600 /dev/null "${CONFIG_ENV}"
   printf 'RUNNER_TOKEN="%s"\n'     "${RUNNER_TOKEN}"
   printf 'BROKER_URL="%s"\n'       "${BROKER_URL}"
   printf 'BROKER_SECRET="%s"\n'    "${BROKER_SECRET}"
-  printf 'ACCESS_TOKEN="%s"\n'     "${ACCESS_TOKEN}"
-  printf 'ALLOW_BATTERY="%s"\n'    "${ALLOW_BATTERY}"
+  printf 'ACCESS_TOKEN="%s"\n'         "${ACCESS_TOKEN}"
+  printf 'ALLOW_BATTERY="%s"\n'        "${ALLOW_BATTERY}"
+  printf 'AUTO_UPDATE="%s"\n'          "${AUTO_UPDATE}"
+  printf 'UPDATE_REPO="%s"\n'          "${UPDATE_REPO}"
+  printf 'UPDATE_REF="%s"\n'           "${UPDATE_REF}"
+  printf 'UPDATE_MIN_INTERVAL="%s"\n'  "${UPDATE_MIN_INTERVAL}"
 } > "${CONFIG_ENV}"
 
 chmod 600 "${CONFIG_ENV}"
@@ -246,14 +260,20 @@ fi
 # 5. Install runner-loop.sh into the runner dir (make it launchd-reachable)
 # ---------------------------------------------------------------------------
 
-LOOP_SRC="${SCRIPT_DIR}/runner-loop.sh"
-LOOP_DST="${RUNNER_DIR}/runner-loop.sh"
+for _script in runner-loop.sh runner-bootstrap.sh self-update.sh; do
+  [[ -f "${SCRIPT_DIR}/${_script}" ]] || fatal "${_script} not found at ${SCRIPT_DIR}/${_script} — run install.sh from the ios/ directory."
+  cp "${SCRIPT_DIR}/${_script}" "${RUNNER_DIR}/${_script}"
+  chmod 755 "${RUNNER_DIR}/${_script}"
+  info "${_script} copied to ${RUNNER_DIR}/${_script}."
+done
 
-[[ -f "${LOOP_SRC}" ]] || fatal "runner-loop.sh not found at ${LOOP_SRC} — run install.sh from the ios/ directory."
-
-cp "${LOOP_SRC}" "${LOOP_DST}"
-chmod 755 "${LOOP_DST}"
-info "runner-loop.sh copied to ${LOOP_DST}."
+# Seed the local fleet manifest and version stamp from the source dir (if present).
+if [[ -f "${SCRIPT_DIR}/.fleet-manifest" ]]; then
+  cp "${SCRIPT_DIR}/.fleet-manifest" "${RUNNER_DIR}/.fleet-manifest"
+  _seed_ver="$(grep '^version=' "${SCRIPT_DIR}/.fleet-manifest" | head -1 | cut -d= -f2)"
+  [[ -n "${_seed_ver}" ]] && printf '%s\n' "${_seed_ver}" > "${RUNNER_DIR}/.fleet-version"
+  info "Seeded .fleet-manifest and .fleet-version (${_seed_ver}) into ${RUNNER_DIR}."
+fi
 
 # ---------------------------------------------------------------------------
 # 6. Install launchd plist (rewrite paths, then load)

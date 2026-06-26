@@ -1,18 +1,35 @@
 #!/usr/bin/env bash
 # runner-loop.sh — ephemeral re-registration loop for the iOS/Android-on-Mac self-hosted runner.
 #
-# Driven by launchd (com.example.gh-runner.plist) and loops forever:
+# Driven by runner-bootstrap.sh (ProgramArguments target for com.example.gh-runner.plist) and
+# loops forever:
 #   1. Battery guard — skips a cycle if on battery and ALLOW_BATTERY != 1.
 #   2. Mint a fresh registration token each cycle (ephemeral runners expire the token after one job).
 #   3. Register + run one job (--ephemeral -> run.sh exits after one job).
-#   4. Re-register clean. Repeat.
+#   4. After a completed job: clear crash counter, snapshot last_good/, check for fleet-code update.
+#   5. Re-register clean. Repeat.
 #
 # Token acquisition priority (checked in order):
 #   RUNNER_TOKEN (static)  ->  BROKER_URL (token-broker)  ->  ACCESS_TOKEN (PAT, mints via REST)
 #
+# Fleet self-update: the broker /token response may include fleet_update {desired_ref,
+# manifest_sha256, min_version}. After each completed job, self-update.sh is invoked. If it
+# applied an update (exit 77), this loop exits 0 so launchd (KeepAlive=true) relaunches
+# runner-bootstrap.sh, which exec's the new runner-loop.sh.
+#
+# SELFTEST mode: SELFTEST=1 SELFTEST_CONFIG=/path/to/config.env bash runner-loop.sh
+#   Verifies required function definitions without registering or running jobs. Used by
+#   self-update.sh to validate a staged runner-loop.sh before committing.
+#
 # Graceful shutdown: SIGTERM/SIGINT triggers deregistration before exit.
 
 set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# SELFTEST early setup
+# ---------------------------------------------------------------------------
+
+_SELFTEST="${SELFTEST:-0}"
 
 # ---------------------------------------------------------------------------
 # Bootstrap — locate config.env relative to this script's install dir
@@ -21,13 +38,18 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_ENV="${SCRIPT_DIR}/config.env"
 
-[[ -f "${CONFIG_ENV}" ]] || {
-  echo "[ERROR] config.env not found at ${CONFIG_ENV}. Run install.sh first." >&2
-  exit 1
-}
-
-# shellcheck source=/dev/null
-source "${CONFIG_ENV}"
+if [[ "${_SELFTEST}" == "1" ]]; then
+  # In SELFTEST mode, source the production config provided by self-update.sh.
+  # shellcheck source=/dev/null
+  source "${SELFTEST_CONFIG:-/dev/null}" 2>/dev/null || true
+else
+  [[ -f "${CONFIG_ENV}" ]] || {
+    echo "[ERROR] config.env not found at ${CONFIG_ENV}. Run install.sh first." >&2
+    exit 1
+  }
+  # shellcheck source=/dev/null
+  source "${CONFIG_ENV}"
+fi
 
 # ---------------------------------------------------------------------------
 # Defaults and derived values
@@ -52,25 +74,48 @@ RUNNER_DIR="${SCRIPT_DIR}"
 BATTERY_SLEEP_SECONDS=60
 REGISTRATION_RETRY_SECONDS=30
 
+AUTO_UPDATE="${AUTO_UPDATE:-1}"
+UPDATE_MIN_INTERVAL="${UPDATE_MIN_INTERVAL:-300}"
+
+# Local fleet-code version — sent as X-Fleet-Version to the broker each cycle.
+FLEET_VERSION="$(cat "${RUNNER_DIR}/.fleet-version" 2>/dev/null || echo "")"
+
+# Fleet update fields — populated by _acquire_reg_token from the broker /token response.
+FLEET_DESIRED_REF=""
+FLEET_MANIFEST_SHA256=""
+FLEET_MIN_VERSION=""
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-# All logging goes to STDERR. This is load-bearing: _acquire_reg_token returns the token via a
-# global (not $(...) capture), and keeping logs off stdout prevents any accidental capture from
-# ever polluting a token value. (An earlier version echoed [INFO] lines to stdout *and* returned
-# the token via command substitution — the logs were captured INTO the token, yielding a multiline
-# garbage value that broke every registration. Do not reintroduce stdout logging.)
+# All logging goes to STDERR — load-bearing: keeps logs out of command-substitution captures
+# so token values are never polluted by log lines. Do not introduce stdout logging.
 log()   { echo "[$(date '+%Y-%m-%dT%H:%M:%S')] [INFO]  $*" >&2; }
 warn()  { echo "[$(date '+%Y-%m-%dT%H:%M:%S')] [WARN]  $*" >&2; }
 fatal() { echo "[$(date '+%Y-%m-%dT%H:%M:%S')] [ERROR] $*" >&2; exit 1; }
 
-# Mask credentials embedded in a URL authority (https://user:secret@host -> https://***@host) so a
-# BROKER_URL with inline creds never lands verbatim in the launchd log files.
+# Mask credentials embedded in a URL authority (https://user:secret@host -> https://***@host).
 _mask_url() { echo "$1" | sed -E 's#://[^@/]+@#://***@#'; }
 
 # Extract a top-level string field from a JSON object on stdin.
 _json_field() { python3 -c "import sys,json; print(json.load(sys.stdin)['$1'])"; }
+
+# Parse fleet_update fields from broker JSON on stdin; outputs three lines (empty if absent/null).
+_parse_fleet_update() {
+  python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    fu = d.get('fleet_update') or {}
+    print(fu.get('desired_ref') or '')
+    print(fu.get('manifest_sha256') or '')
+    v = fu.get('min_version')
+    print(v if v else '')
+except Exception:
+    print(''); print(''); print('')
+"
+}
 
 # ---------------------------------------------------------------------------
 # Graceful shutdown — deregister before exit on SIGTERM / SIGINT
@@ -111,6 +156,9 @@ REG_TOKEN=""
 
 _acquire_reg_token() {
   REG_TOKEN=""
+  FLEET_DESIRED_REF=""
+  FLEET_MANIFEST_SHA256=""
+  FLEET_MIN_VERSION=""
 
   # Priority 1: static RUNNER_TOKEN (Model A, manual one-off).
   # WARNING: a bare registration token expires ~1h after minting, so it survives only the FIRST
@@ -122,19 +170,27 @@ _acquire_reg_token() {
   fi
 
   # Priority 2: token-broker (Model B — no GitHub credential on this machine).
-  # Broker API: POST /token with Authorization: Bearer <BROKER_SECRET>
-  # Returns: {"token": "...", "expires_at": "...", "url": "..."}
-  # See: https://github.com/islee/gh-runners/tree/main/broker
+  # Also the only path that receives fleet_update from the broker response.
   if [[ -n "${BROKER_URL}" ]]; then
     log "Fetching registration token from broker: $(_mask_url "${BROKER_URL}")"
-    REG_TOKEN="$(curl --silent --fail --max-time 15 -X POST \
+    local _raw
+    _raw="$(curl --silent --fail --max-time 15 -X POST \
       -H "Authorization: Bearer ${BROKER_SECRET}" \
       -H "X-Runner-Name: ${RUNNER_NAME}" \
-      "${BROKER_URL%/}/token" | _json_field token)" || {
+      -H "X-Fleet-Version: ${FLEET_VERSION}" \
+      "${BROKER_URL%/}/token")" || {
       warn "Broker request failed (check BROKER_URL / BROKER_SECRET in config.env)."
       return 1
     }
+    REG_TOKEN="$(echo "${_raw}" | _json_field token)" || { warn "Broker returned unparseable JSON."; return 1; }
     [[ -n "${REG_TOKEN}" ]] || { warn "Broker returned an empty token."; return 1; }
+
+    { read -r FLEET_DESIRED_REF
+      read -r FLEET_MANIFEST_SHA256
+      read -r FLEET_MIN_VERSION
+    } < <(echo "${_raw}" | _parse_fleet_update 2>/dev/null) \
+      || { FLEET_DESIRED_REF=""; FLEET_MANIFEST_SHA256=""; FLEET_MIN_VERSION=""; }
+
     return 0
   fi
 
@@ -160,6 +216,31 @@ _acquire_reg_token() {
 
   fatal "No credential available (RUNNER_TOKEN, BROKER_URL, ACCESS_TOKEN all unset). Fix config.env."
 }
+
+# ---------------------------------------------------------------------------
+# Post-job bookkeeping — clear crash counter and snapshot last_good/
+# ---------------------------------------------------------------------------
+
+_record_job_complete() {
+  printf 'starts=0\nhas_pending_swap=0\n' > "${RUNNER_DIR}/.fleet-state"
+  mkdir -p "${RUNNER_DIR}/last_good"
+  local _f
+  for _f in runner-loop.sh self-update.sh; do
+    [[ -f "${RUNNER_DIR}/${_f}" ]] && cp "${RUNNER_DIR}/${_f}" "${RUNNER_DIR}/last_good/${_f}"
+  done
+  log "Crash counter cleared and last_good/ snapshot updated post-job."
+}
+
+# ---------------------------------------------------------------------------
+# SELFTEST exit point — after all function definitions, before main loop
+# ---------------------------------------------------------------------------
+
+if [[ "${_SELFTEST}" == "1" ]]; then
+  type _acquire_reg_token    &>/dev/null || exit 1
+  type _shutdown             &>/dev/null || exit 1
+  type _record_job_complete  &>/dev/null || exit 1
+  exit 0
+fi
 
 # ---------------------------------------------------------------------------
 # Main loop
@@ -191,7 +272,6 @@ while true; do
     RETRY_ATTEMPT=$(( RETRY_ATTEMPT + 1 ))
     # Exponential backoff with jitter, capped at 300s. WHY: multiple machines hitting the same
     # GitHub rate-limit must not retry in lockstep (thundering herd); jitter decorrelates them.
-    # The exponent is capped to avoid integer overflow on a prolonged outage.
     exp=$(( RETRY_ATTEMPT - 1 )); (( exp > 6 )) && exp=6
     backoff=$(( REGISTRATION_RETRY_SECONDS * (2 ** exp) )); (( backoff > 300 )) && backoff=300
     backoff=$(( backoff + (RANDOM % 15) ))
@@ -202,14 +282,25 @@ while true; do
   RETRY_ATTEMPT=0
   _CURRENT_REG_TOKEN="${REG_TOKEN}"
 
+  # Advisory: log if fleet-code version is below the broker-specified minimum.
+  if [[ -n "${FLEET_MIN_VERSION}" && -n "${FLEET_VERSION}" ]]; then
+    if ! python3 -c "
+import sys
+try:
+    a = [int(x) for x in '${FLEET_VERSION}'.strip().split('.') if x.isdigit()]
+    b = [int(x) for x in '${FLEET_MIN_VERSION}'.strip().split('.') if x.isdigit()]
+    sys.exit(0 if a >= b else 1)
+except Exception:
+    sys.exit(0)
+" 2>/dev/null; then
+      warn "Advisory: fleet-code version '${FLEET_VERSION}' is below minimum '${FLEET_MIN_VERSION}'. Update will apply after the next job if AUTO_UPDATE=1."
+    fi
+  fi
+
   # ------ Register (ephemeral) + run one job -----------------------------
-  # Fixed name (gh-runner-ios-<id>-<n> from config.env, resolved above). --replace re-claims this
-  # machine's own prior registration each cycle; <id> keeps it distinct from other machines.
   log "Registering runner: ${RUNNER_NAME}"
 
-  # WHY: --ephemeral tells the runner to deregister itself after completing exactly one job.
-  # --replace removes any stale registration with the same name so re-runs don't collide.
-  # config.sh exits 0 on success; if it fails we skip this cycle and retry.
+  # WHY: --ephemeral deregisters after exactly one job; --replace clears stale same-name entries.
   if ! nice -n "${NICE_PRIORITY}" "${RUNNER_DIR}/config.sh" \
     --unattended \
     --ephemeral \
@@ -220,9 +311,6 @@ while true; do
     --name "${RUNNER_NAME}"; then
     warn "config.sh failed — will retry in ${REGISTRATION_RETRY_SECONDS}s."
     _CURRENT_REG_TOKEN=""
-    # WHY: config.sh fails with "already configured" when stale local registration files (.runner,
-    # .credentials*) remain from a prior cycle or reinstall. Clearing them here self-heals the loop
-    # without operator intervention. A prior registration may linger OFFLINE in GitHub until pruned.
     rm -f "${RUNNER_DIR}/.runner" "${RUNNER_DIR}/.credentials" "${RUNNER_DIR}/.credentials_rsaparams" || true
     sleep "${REGISTRATION_RETRY_SECONDS}"
     continue
@@ -230,17 +318,31 @@ while true; do
 
   log "Runner registered as ${RUNNER_NAME}. Waiting for a job..."
 
-  # WHY: run.sh blocks until exactly one job completes (because --ephemeral), then exits 0.
-  # We run it with nice so CPU-intensive jobs don't peg the machine.
-  # If run.sh exits non-zero (job failure or runner error) we log but still loop — the runner
-  # picks up the next job rather than staying stuck.
-  if ! nice -n "${NICE_PRIORITY}" "${RUNNER_DIR}/run.sh"; then
-    warn "run.sh exited with a non-zero status — looping to re-register."
-  else
-    log "Job complete. Re-registering for next job."
-  fi
-
+  _run_exit=0
+  nice -n "${NICE_PRIORITY}" "${RUNNER_DIR}/run.sh" || _run_exit=$?
   _CURRENT_REG_TOKEN=""
-  # No sleep between cycles — re-register immediately to stay available.
+
+  if (( _run_exit != 0 )); then
+    warn "run.sh exited with a non-zero status (${_run_exit}) — looping to re-register."
+  else
+    log "Job complete. Running post-job bookkeeping and update check."
+    _record_job_complete
+
+    # Invoke fleet-code updater at the ephemeral boundary (between jobs). Non-fatal.
+    if [[ -n "${FLEET_DESIRED_REF}" && -n "${FLEET_MANIFEST_SHA256}" ]]; then
+      _su_exit=0
+      "${RUNNER_DIR}/self-update.sh" "${FLEET_DESIRED_REF}" "${FLEET_MANIFEST_SHA256}" || _su_exit=$?
+      if (( _su_exit == 77 )); then
+        # UPDATE_APPLIED: exit 0 so launchd (KeepAlive=true) relaunches runner-bootstrap.sh,
+        # which exec's the newly-installed runner-loop.sh.
+        log "Fleet-code update applied — exiting for launchd to relaunch new payload."
+        exit 0
+      elif (( _su_exit != 0 )); then
+        warn "self-update.sh returned ${_su_exit} (non-fatal, continuing loop)."
+      fi
+    fi
+
+    log "Re-registering for next job."
+  fi
 
 done

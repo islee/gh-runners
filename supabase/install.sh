@@ -13,6 +13,8 @@
 #                     [--runner-base DIR] [--runner-version VERSION]
 #                     [--extra-packages "p1 p2"] [--skip-job-deps]
 #                     [--toolcache-dir DIR] [--skip-toolcache] [--stage-python VER ...]
+#                     [--no-auto-update] [--update-repo SLUG] [--update-ref REF]
+#                     [--update-min-interval SECONDS]
 #
 # Credential priority (high -> low): static token -> broker -> PAT. Supply exactly one.
 #
@@ -52,6 +54,10 @@ OWNER="${OWNER:-$(hostname -s)}"
 : "${BROKER_URL:=}"
 : "${BROKER_SECRET:=}"
 : "${ACCESS_TOKEN:=}"
+AUTO_UPDATE="1"
+UPDATE_REPO="islee/gh-runners"
+UPDATE_REF=""
+UPDATE_MIN_INTERVAL="300"
 
 # Job-runtime parity (see install_job_deps / provision_toolcache). GitHub-hosted runners ship a
 # baseline of tools that setup-* actions and typical jobs assume; a bare host has none, so jobs fail
@@ -91,11 +97,16 @@ while [[ $# -gt 0 ]]; do
     --skip-job-deps)  SKIP_JOB_DEPS=1;      shift   ;;   # do not install job-runtime OS packages
     --toolcache-dir)  TOOLCACHE_DIR="$2";   shift 2 ;;   # shared tool cache dir (AGENT_TOOLSDIRECTORY)
     --skip-toolcache) SKIP_TOOLCACHE=1;     shift   ;;   # do not create/stage the tool cache
-    --stage-python)   STAGE_PYTHON_VERSIONS+=("$2"); shift 2 ;;  # repeatable: pre-stage Python <ver> (e.g. 3.13)
+    --stage-python)         STAGE_PYTHON_VERSIONS+=("$2"); shift 2 ;;
+    --no-auto-update)       AUTO_UPDATE="0";          shift   ;;
+    --update-repo)          UPDATE_REPO="$2";         shift 2 ;;
+    --update-ref)           UPDATE_REF="$2";          shift 2 ;;
+    --update-min-interval)  UPDATE_MIN_INTERVAL="$2"; shift 2 ;;
     *) echo "Unknown flag: $1" >&2
        echo "Usage: sudo $0 (--token T | --broker-url URL [--broker-secret S] | --access-token PAT)" >&2
        echo "         [--org ORG] [--labels LABELS] [--count N] [--user USER] [--runner-base DIR] [--runner-version V]" >&2
        echo "         [--extra-packages \"p1 p2\"] [--skip-job-deps] [--toolcache-dir DIR] [--skip-toolcache] [--stage-python VER ...]" >&2
+       echo "         [--no-auto-update] [--update-repo SLUG] [--update-ref REF] [--update-min-interval SECONDS]" >&2
        exit 1 ;;
   esac
 done
@@ -120,8 +131,10 @@ id "${RUN_USER}" &>/dev/null || fatal "Run user '${RUN_USER}' does not exist (pa
 if [[ -z "${RUNNER_TOKEN}" && -z "${BROKER_URL}" && -z "${ACCESS_TOKEN}" ]]; then
   fatal "No credential supplied. Pass one of --token / --broker-url / --access-token."
 fi
-[[ -f "${SCRIPT_DIR}/runner-loop.sh" ]] || fatal "runner-loop.sh missing — run install.sh from the supabase/ dir."
-[[ -f "${SCRIPT_DIR}/${SERVICE_NAME}" ]] || fatal "${SERVICE_NAME} template missing — run from the supabase/ dir."
+[[ -f "${SCRIPT_DIR}/runner-loop.sh" ]]     || fatal "runner-loop.sh missing — run install.sh from the supabase/ dir."
+[[ -f "${SCRIPT_DIR}/runner-bootstrap.sh" ]] || fatal "runner-bootstrap.sh missing — run install.sh from the supabase/ dir."
+[[ -f "${SCRIPT_DIR}/self-update.sh" ]]      || fatal "self-update.sh missing — run install.sh from the supabase/ dir."
+[[ -f "${SCRIPT_DIR}/${SERVICE_NAME}" ]]     || fatal "${SERVICE_NAME} template missing — run from the supabase/ dir."
 
 ARCH="$(uname -m)"
 case "${ARCH}" in
@@ -234,13 +247,26 @@ for i in $(seq 1 "${COUNT}"); do
   _write_kv RUNNER_LABELS "${RUNNER_LABELS}" "${CONFIG_ENV}"
   _write_kv RUNNER_NAME   "gh-runner-${RUNNER_TYPE}-${OWNER}-${i}" "${CONFIG_ENV}"
   _write_kv RUNNER_TOKEN  "${RUNNER_TOKEN}"  "${CONFIG_ENV}"
-  _write_kv BROKER_URL    "${BROKER_URL}"    "${CONFIG_ENV}"
-  _write_kv BROKER_SECRET "${BROKER_SECRET}" "${CONFIG_ENV}"
-  _write_kv ACCESS_TOKEN  "${ACCESS_TOKEN}"  "${CONFIG_ENV}"
+  _write_kv BROKER_URL          "${BROKER_URL}"          "${CONFIG_ENV}"
+  _write_kv BROKER_SECRET       "${BROKER_SECRET}"       "${CONFIG_ENV}"
+  _write_kv ACCESS_TOKEN        "${ACCESS_TOKEN}"        "${CONFIG_ENV}"
+  _write_kv AUTO_UPDATE         "${AUTO_UPDATE}"         "${CONFIG_ENV}"
+  _write_kv UPDATE_REPO         "${UPDATE_REPO}"         "${CONFIG_ENV}"
+  _write_kv UPDATE_REF          "${UPDATE_REF}"          "${CONFIG_ENV}"
+  _write_kv UPDATE_MIN_INTERVAL "${UPDATE_MIN_INTERVAL}" "${CONFIG_ENV}"
   chmod 600 "${CONFIG_ENV}"
 
-  cp "${SCRIPT_DIR}/runner-loop.sh" "${INST_DIR}/runner-loop.sh"
-  chmod 755 "${INST_DIR}/runner-loop.sh"
+  for _script in runner-loop.sh runner-bootstrap.sh self-update.sh; do
+    cp "${SCRIPT_DIR}/${_script}" "${INST_DIR}/${_script}"
+    chmod 755 "${INST_DIR}/${_script}"
+  done
+
+  if [[ -f "${SCRIPT_DIR}/.fleet-manifest" ]]; then
+    cp "${SCRIPT_DIR}/.fleet-manifest" "${INST_DIR}/.fleet-manifest"
+    _seed_ver="$(grep '^version=' "${SCRIPT_DIR}/.fleet-manifest" | head -1 | cut -d= -f2)"
+    [[ -n "${_seed_ver}" ]] && printf '%s\n' "${_seed_ver}" > "${INST_DIR}/.fleet-version"
+  fi
+
   chown -R "${RUN_USER}" "${INST_DIR}"
 done
 rm -f "${TMP_TGZ}"
