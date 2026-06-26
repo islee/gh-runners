@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import collections
 import hmac
+import json
 import logging
 import os
 import time
@@ -65,6 +66,32 @@ RATE_LIMIT_BURST = int(os.environ.get("RATE_LIMIT_BURST", str(RATE_LIMIT_PER_MIN
 # Supabase, then memory). Durable backends survive restarts; memory resets on each cold start.
 RUNNER_STATS_WINDOW_SECONDS = int(os.environ.get("RUNNER_STATS_WINDOW_SECONDS", "86400"))
 RUNNER_STATS_MAX_EVENTS = int(os.environ.get("RUNNER_STATS_MAX_EVENTS", "10000"))
+
+# Fleet self-update channel. All three are OPTIONAL — when FLEET_DESIRED_REF is unset the
+# feature is fully dormant and /token responses contain no fleet_update key. See
+# docs/fleet-self-update.md for the design and release process.
+#
+# WHY here: optional config follows the same import-time pattern as the other optional vars
+# (rate limit, stats backend) — fail-fast for required creds, warn-and-continue for optional.
+FLEET_DESIRED_REF: str | None = os.environ.get("FLEET_DESIRED_REF")
+FLEET_MIN_VERSION: str | None = os.environ.get("FLEET_MIN_VERSION")
+
+# FLEET_MANIFEST_SHA256 is a JSON object string mapping runner TYPE → hex sha256 of that
+# type's .fleet-manifest (computed by release.sh). The broker serves it as the out-of-repo
+# trust anchor so the runner can verify the fetched manifest independently of GitHub.
+# On malformed JSON we warn and fall back to {} — never crash import.
+_fleet_manifest_map: dict[str, str] = {}
+_fleet_manifest_raw = os.environ.get("FLEET_MANIFEST_SHA256", "")
+if _fleet_manifest_raw:
+    try:
+        _parsed = json.loads(_fleet_manifest_raw)
+        if not isinstance(_parsed, dict):
+            raise ValueError("expected a JSON object mapping type -> sha256 hex string")
+        _fleet_manifest_map = _parsed
+    except Exception:
+        log.warning(
+            "FLEET_MANIFEST_SHA256 is not valid JSON — fleet_update dormant for all runner types"
+        )
 
 # Background task set: keeps asyncio.Task references alive until they complete so fire-and-forget
 # persistence calls are not garbage-collected mid-flight.
@@ -145,10 +172,17 @@ class RunnerStats:
         self.window = window_s
         self._clock = clock
         self._events: collections.deque = collections.deque(maxlen=max_events)
+        # Latest fleet-code version reported by each named runner (runner name → version string).
+        # Bounded: names are fixed (gh-runner-<type>-<id>-<n>), so the dict size is proportional
+        # to the number of distinct runners, not the number of events.
+        self._latest_fleet_version: dict[str, str] = {}
 
-    async def record(self, kind: str, name: str | None) -> None:
+    async def record(self, kind: str, name: str | None, fleet_version: str | None = None) -> None:
         rtype, host = parse_runner_name(name)
         self._events.append((self._clock(), kind, name or "?", rtype, host))
+        # Only index fleet_version when we have a real runner name to key on.
+        if fleet_version and name:
+            self._latest_fleet_version[name] = fleet_version
 
     def _prune(self, now: float) -> None:
         cutoff = now - self.window
@@ -202,6 +236,12 @@ class RunnerStats:
                     "token": r["token"],
                     "remove-token": r["remove-token"],
                     "last_seen": _iso(r["last_seen"]),
+                    # Include fleet_version only when the runner has ever reported one.
+                    **(
+                        {"fleet_version": self._latest_fleet_version[name]}
+                        if name in self._latest_fleet_version
+                        else {}
+                    ),
                 }
                 for name, r in by_runner.items()
             ),
@@ -276,8 +316,14 @@ class SupabaseStatsStore:
                 return r.json()
             return None
 
-    async def record(self, kind: str, name: str | None) -> None:
-        """Record a token/remove-token event. Best-effort: never raises on failure."""
+    async def record(self, kind: str, name: str | None, fleet_version: str | None = None) -> None:
+        """Record a token/remove-token event. Best-effort: never raises on failure.
+
+        NOTE: fleet_version is accepted for interface parity but NOT persisted — doing so would
+        require a new fleet_version column in runner_stats (see broker/supabase_stats.sql).
+        TODO: add fleet_version persistence when the SQL migration is run (P1 deferred; Supabase
+        unused in prod). For now the Upstash/memory backends cover fleet-version observability.
+        """
         try:
             rtype, host = parse_runner_name(name)
             runner = name or "unknown"
@@ -434,23 +480,26 @@ class RedisStatsStore:
             r.raise_for_status()
             return [item.get("result") for item in r.json()]
 
-    async def record(self, kind: str, name: str | None) -> None:
+    async def record(self, kind: str, name: str | None, fleet_version: str | None = None) -> None:
         """Record a token/remove-token event. Best-effort: never raises on failure."""
         try:
             rtype, host = parse_runner_name(name)
             runner = name or "unknown"
             ts = int(self._clock())
-            await self._pipeline(
-                [
-                    ["HINCRBY", "ghr:count:type", f"{rtype}:{kind}", 1],
-                    ["HINCRBY", "ghr:count:host", f"{host}:{kind}", 1],
-                    ["HINCRBY", "ghr:count:runner", f"{runner}:{kind}", 1],
-                    ["HSET", "ghr:last:type", rtype, ts],
-                    ["HSET", "ghr:last:host", host, ts],
-                    ["HSET", "ghr:last:runner", runner, ts],
-                    ["SET", "ghr:since", ts, "NX"],
-                ]
-            )
+            commands: list[list] = [
+                ["HINCRBY", "ghr:count:type", f"{rtype}:{kind}", 1],
+                ["HINCRBY", "ghr:count:host", f"{host}:{kind}", 1],
+                ["HINCRBY", "ghr:count:runner", f"{runner}:{kind}", 1],
+                ["HSET", "ghr:last:type", rtype, ts],
+                ["HSET", "ghr:last:host", host, ts],
+                ["HSET", "ghr:last:runner", runner, ts],
+                ["SET", "ghr:since", ts, "NX"],
+            ]
+            # ghr:fleetver:runner: hash of runner name → latest reported fleet-code version.
+            # Written only when the runner supplies X-Fleet-Version; best-effort like all writes.
+            if fleet_version and name:
+                commands.append(["HSET", "ghr:fleetver:runner", runner, fleet_version])
+            await self._pipeline(commands)
         except Exception:
             log.warning("redis record failed for kind=%s name=%s", kind, name, exc_info=True)
 
@@ -466,6 +515,8 @@ class RedisStatsStore:
                     ["HGETALL", "ghr:last:host"],
                     ["HGETALL", "ghr:last:runner"],
                     ["GET", "ghr:since"],
+                    # Latest fleet-code version per runner name (written by record() when present).
+                    ["HGETALL", "ghr:fleetver:runner"],
                 ]
             )
             (
@@ -476,6 +527,7 @@ class RedisStatsStore:
                 last_host_raw,
                 last_runner_raw,
                 since_raw,
+                fleetver_runner_raw,
             ) = results
 
             def _flat_to_dict(flat: list | None) -> dict[str, str]:
@@ -491,6 +543,7 @@ class RedisStatsStore:
             last_type = _flat_to_dict(last_type_raw)
             last_host = _flat_to_dict(last_host_raw)
             last_runner = _flat_to_dict(last_runner_raw)
+            fleetver_runner = _flat_to_dict(fleetver_runner_raw)
 
             def _build_group(counts: dict[str, str], lasts: dict[str, str]) -> dict:
                 """Accumulate counts by entity, overlay last_seen timestamps."""
@@ -521,6 +574,12 @@ class RedisStatsStore:
                         "token": e["token"],
                         "remove-token": e["remove-token"],
                         "last_seen": e["last_seen"],
+                        # Include fleet_version only when the runner has ever reported one.
+                        **(
+                            {"fleet_version": fleetver_runner[name]}
+                            if name in fleetver_runner
+                            else {}
+                        ),
                     }
                     for name, e in by_runner.items()
                 ),
@@ -611,16 +670,33 @@ _stats: RunnerStats | RedisStatsStore | SupabaseStatsStore = _make_stats()
 log.info("stats backend: %s", _stats.backend)
 
 
-def _persist(kind: str, name: str | None) -> None:
+def _persist(kind: str, name: str | None, fleet_version: str | None = None) -> None:
     """Fire-and-forget: schedule a background persistence task for a record() call.
 
     WHY: the hot path (/token, /remove-token) must not block on store I/O (Redis or Supabase).
     We schedule an asyncio.Task and keep a reference in _bg_tasks so the GC doesn't collect it
     mid-flight. record() implementations are best-effort and swallow their own exceptions.
     """
-    t = asyncio.create_task(_stats.record(kind, name))
+    t = asyncio.create_task(_stats.record(kind, name, fleet_version))
     _bg_tasks.add(t)
     t.add_done_callback(_bg_tasks.discard)
+
+
+def _fleet_update_for(rtype: str) -> dict | None:
+    """Build the fleet_update payload for the given runner type.
+
+    Returns a dict with desired_ref, manifest_sha256, and min_version ONLY when
+    FLEET_DESIRED_REF is set AND the type has an entry in the parsed manifest map.
+    Returns None otherwise so the caller can omit the key entirely — keeping /token
+    backward-compatible when the feature is not configured or the type is not yet enrolled.
+    """
+    if not FLEET_DESIRED_REF or rtype not in _fleet_manifest_map:
+        return None
+    return {
+        "desired_ref": FLEET_DESIRED_REF,
+        "manifest_sha256": _fleet_manifest_map[rtype],
+        "min_version": FLEET_MIN_VERSION,
+    }
 
 
 def _client_key(request: Request) -> str:
@@ -781,13 +857,29 @@ async def token(
     request: Request,
     authorization: str | None = Header(default=None),
     x_runner_name: str | None = Header(default=None),
+    x_fleet_version: str | None = Header(default=None),
 ) -> dict:
     _rate_limit(request)
     _check_auth(authorization)
     d = await _mint("registration-token")
-    _persist("token", x_runner_name)
-    log.info("minted registration token for runner=%s", x_runner_name or "?")
-    return {"token": d["token"], "expires_at": d["expires_at"], "url": f"https://github.com/{ORG}"}
+    _persist("token", x_runner_name, fleet_version=x_fleet_version)
+    log.info(
+        "minted registration token for runner=%s fleet_version=%s",
+        x_runner_name or "?",
+        x_fleet_version or "?",
+    )
+    resp: dict = {
+        "token": d["token"],
+        "expires_at": d["expires_at"],
+        "url": f"https://github.com/{ORG}",
+    }
+    # Append fleet_update ONLY when the feature is configured for this runner type. Omit the
+    # key entirely (don't emit null) so older runners that don't know this field are unaffected.
+    rtype = parse_runner_name(x_runner_name)[0]
+    fleet_update = _fleet_update_for(rtype)
+    if fleet_update is not None:
+        resp["fleet_update"] = fleet_update
+    return resp
 
 
 @app.post("/remove-token")
@@ -795,12 +887,17 @@ async def remove_token(
     request: Request,
     authorization: str | None = Header(default=None),
     x_runner_name: str | None = Header(default=None),
+    x_fleet_version: str | None = Header(default=None),
 ) -> dict:
     _rate_limit(request)
     _check_auth(authorization)
     d = await _mint("remove-token")
     _persist("remove-token", x_runner_name)
-    log.info("minted remove token for runner=%s", x_runner_name or "?")
+    log.info(
+        "minted remove token for runner=%s fleet_version=%s",
+        x_runner_name or "?",
+        x_fleet_version or "?",
+    )
     return {"token": d["token"], "expires_at": d["expires_at"]}
 
 
