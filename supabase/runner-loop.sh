@@ -54,7 +54,7 @@ _shutdown() {
   local _rm=""
   if [[ -n "${BROKER_URL}" ]]; then
     _rm="$(curl --silent --fail --max-time 10 -X POST \
-      -H "Authorization: Bearer ${BROKER_SECRET}" -H "X-Runner-Name: $(hostname -s)" \
+      -H "Authorization: Bearer ${BROKER_SECRET}" -H "X-Runner-Name: ${RUNNER_NAME}" \
       "${BROKER_URL%/}/remove-token" | _json_field token 2>/dev/null)" || _rm=""
   elif [[ -n "${ACCESS_TOKEN}" ]]; then
     _rm="$(curl --silent --fail --max-time 10 \
@@ -86,7 +86,7 @@ _acquire_reg_token() {
   if [[ -n "${BROKER_URL}" ]]; then
     log "Fetching registration token from broker: $(_mask_url "${BROKER_URL}")"
     REG_TOKEN="$(curl --silent --fail --max-time 15 -X POST \
-      -H "Authorization: Bearer ${BROKER_SECRET}" -H "X-Runner-Name: $(hostname -s)" \
+      -H "Authorization: Bearer ${BROKER_SECRET}" -H "X-Runner-Name: ${RUNNER_NAME}" \
       "${BROKER_URL%/}/token" | _json_field token)" || { warn "Broker request failed (BROKER_URL/BROKER_SECRET?)."; return 1; }
     [[ -n "${REG_TOKEN}" ]] || { warn "Broker returned an empty token."; return 1; }
     return 0
