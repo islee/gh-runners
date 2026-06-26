@@ -9,7 +9,7 @@
 #
 # Usage:
 #   sudo ./install.sh (--token TOKEN | --broker-url URL [--broker-secret SECRET] | --access-token PAT)
-#                     [--org ORG] [--labels LABELS] [--count N] [--user RUN_USER]
+#                     [--org ORG] [--runner-type TYPE] [--labels LABELS] [--count N] [--user RUN_USER]
 #                     [--runner-base DIR] [--runner-version VERSION]
 #                     [--extra-packages "p1 p2"] [--skip-job-deps]
 #                     [--toolcache-dir DIR] [--skip-toolcache] [--stage-python VER ...]
@@ -38,20 +38,21 @@ set -euo pipefail
 # periodically. Releases: https://github.com/actions/runner/releases (override with --runner-version).
 readonly DEFAULT_RUNNER_VERSION="2.335.1"
 readonly DEFAULT_ORG="your-org"
-readonly DEFAULT_LABELS="self-hosted,linux,x64,light"
-readonly RUNNER_TYPE="light"   # <type> in the gh-runner-<type>-<id>-<n> name convention
+readonly DEFAULT_RUNNER_TYPE="light"   # <type> in gh-runner-<type>-<id>-<n>; override with --runner-type
 readonly DEFAULT_COUNT=2
-readonly DEFAULT_RUNNER_BASE="/opt/gh-runner-light"
 readonly SERVICE_NAME="gh-runner@.service"
-# SERVICE_NAME is the source template filename (kept generic); UNIT_NAME is the installed unit name,
-# per-type so co-hosted runner types (light + supabase) don't overwrite each other's template.
-readonly UNIT_NAME="gh-runner-${RUNNER_TYPE}@.service"
+# RUNNER_TYPE selects the per-type label, base dir, registered name, and systemd unit name (all derived
+# AFTER arg parsing so --runner-type is known). Default "light"; --runner-type playwright stands up a
+# dedicated browser runner (with --with-playwright) whose unit (gh-runner-playwright@.service), base
+# (/opt/gh-runner-playwright), and name won't collide with the plain light runners. SERVICE_NAME is the
+# generic source template; UNIT_NAME is the installed, per-type unit so co-hosted types don't clash.
+RUNNER_TYPE="${RUNNER_TYPE:-${DEFAULT_RUNNER_TYPE}}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; readonly SCRIPT_DIR
 
 GH_ORG="${GH_ORG:-${DEFAULT_ORG}}"
-RUNNER_LABELS="${RUNNER_LABELS:-${DEFAULT_LABELS}}"
+RUNNER_LABELS="${RUNNER_LABELS:-}"   # type-derived default (self-hosted,linux,x64,<type>) filled in post-parse
 COUNT="${COUNT:-${DEFAULT_COUNT}}"
-RUNNER_BASE="${RUNNER_BASE:-${DEFAULT_RUNNER_BASE}}"
+RUNNER_BASE="${RUNNER_BASE:-}"       # type-derived default (/opt/gh-runner-<type>) filled in post-parse
 RUNNER_VERSION="${RUNNER_VERSION:-${DEFAULT_RUNNER_VERSION}}"
 RUN_USER="${RUN_USER:-${SUDO_USER:-${USER}}}"
 # <id> segment of the name (gh-runner-<type>-<id>-<n>): a user or host tag. Default the host short
@@ -100,6 +101,7 @@ PLAYWRIGHT_BROWSER="chromium"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --org)            GH_ORG="$2";          shift 2 ;;
+    --runner-type)    RUNNER_TYPE="$2";     shift 2 ;;   # type segment: label/base/unit/name (default light)
     --labels)         RUNNER_LABELS="$2";   shift 2 ;;
     --token)          RUNNER_TOKEN="$2";    shift 2 ;;
     --broker-url)     BROKER_URL="$2";      shift 2 ;;
@@ -125,7 +127,7 @@ while [[ $# -gt 0 ]]; do
     --update-min-interval)  UPDATE_MIN_INTERVAL="$2"; shift 2 ;; # seconds floor between update checks
     *) echo "Unknown flag: $1" >&2
        echo "Usage: sudo $0 (--token T | --broker-url URL [--broker-secret S] | --access-token PAT)" >&2
-       echo "         [--org ORG] [--labels LABELS] [--count N] [--user USER] [--runner-base DIR] [--runner-version V]" >&2
+       echo "         [--org ORG] [--runner-type TYPE] [--labels LABELS] [--count N] [--user USER] [--runner-base DIR] [--runner-version V]" >&2
        echo "         [--extra-packages \"p1 p2\"] [--skip-job-deps] [--toolcache-dir DIR] [--skip-toolcache] [--stage-python VER ...]" >&2
        echo "         [--with-playwright] [--playwright-version V] [--playwright-browser B] [--playwright-browsers-path DIR]" >&2
        echo "         [--no-auto-update] [--update-repo SLUG] [--update-ref REF] [--update-min-interval SECONDS]" >&2
@@ -140,6 +142,13 @@ fatal() { echo "[ERROR] $*" >&2; exit 1; }
 # Append one KEY="value" line to a config.env. Done via a helper (not literal assignments in this
 # script) so credential values are never embedded in source and static scanners don't misfire.
 _write_kv() { printf '%s="%s"\n' "$1" "$2" >> "$3"; }
+
+# Derive type-based defaults now that --runner-type is known. RUNNER_TYPE feeds the unit name and
+# filesystem paths, so validate it to a safe charset first.
+[[ "${RUNNER_TYPE}" =~ ^[a-z0-9][a-z0-9-]*$ ]] || fatal "Invalid --runner-type '${RUNNER_TYPE}' (lowercase alnum + dashes)."
+: "${RUNNER_LABELS:=self-hosted,linux,x64,${RUNNER_TYPE}}"
+: "${RUNNER_BASE:=/opt/gh-runner-${RUNNER_TYPE}}"
+UNIT_NAME="gh-runner-${RUNNER_TYPE}@.service"
 
 # When provisioning the Playwright capability, append the `playwright` label so browser jobs can
 # target this runner (idempotent — skip if already present). Done after arg parsing so an explicit
@@ -358,7 +367,7 @@ done
 
 echo ""
 echo "==========================================================="
-echo " light runners installed: ${COUNT} instance(s) under ${RUNNER_BASE}"
+echo " ${RUNNER_TYPE} runners installed: ${COUNT} instance(s) under ${RUNNER_BASE}"
 echo " Run user : ${RUN_USER}    Org: ${GH_ORG}    Labels: ${RUNNER_LABELS}"
 (( WITH_PLAYWRIGHT )) && echo " Playwright: capability ON — browser cache ${PLAYWRIGHT_BROWSERS_PATH} (label 'playwright')"
 echo "==========================================================="
