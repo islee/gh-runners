@@ -59,6 +59,10 @@ light and supabase runners share a host), and enables `gh-runner-light@1 .. gh-r
 | `--toolcache-dir` | `/opt/hostedtoolcache` | Shared tool cache (`AGENT_TOOLSDIRECTORY`) |
 | `--skip-toolcache` | off | Don't create/stage the tool cache |
 | `--stage-python` | — | Repeatable: pre-stage Python `<ver>` (e.g. `3.13`) — **required for setup-python on non-Ubuntu hosts** |
+| `--with-playwright` | off | Provision the Playwright browser capability (system libs + shared cache + `playwright` label) |
+| `--playwright-version` | latest | Pin the `playwright` npm version used to install deps/browsers |
+| `--playwright-browser` | `chromium` | Browser to install deps for and pre-warm |
+| `--playwright-browsers-path` | `/opt/ms-playwright` | Shared, persistent browser cache (`PLAYWRIGHT_BROWSERS_PATH`) |
 
 > **Runner names:** each instance registers as `gh-runner-light-<owner>-<i>` (the
 > `gh-runner-<type>-<id>-<n>` convention) — fixed per instance, re-registered each cycle with `--replace`.
@@ -76,6 +80,26 @@ neither, so `setup-*` actions fail at runtime. `install.sh` closes the gap **ahe
   Ubuntu; on Debian/other distros it cannot download and errors *unless the version is already in the
   tool cache*. Pass `--stage-python 3.13` (repeatable) to pre-stage it from `actions/python-versions`.
   On **Ubuntu** hosts this is optional — `setup-python` downloads successfully (just uncached).
+
+## Playwright capability
+Browser e2e jobs run `playwright install --with-deps`, whose `--with-deps` half needs **root apt** to
+install Chromium's shared libraries — which a job on a non-root runner can't do. `--with-playwright`
+provisions this once at install time and splits the two costs (see `docs/fleet-design.md`):
+
+- **System libraries (root, stable)** — runs `playwright install-deps` so the apt set tracks the OS,
+  not a hardcoded list. Installs `nodejs`/`npm` first if no `npx` is present.
+- **Browser binaries (per-version, cached)** — bakes `Environment=PLAYWRIGHT_BROWSERS_PATH=…` (default
+  `/opt/ms-playwright`) into the unit and pre-warms the browser there. The cache is shared across
+  instances and persists across jobs; each job's `playwright install` is then a fast cache hit.
+- **Label** — appends `playwright` to the runner's labels so browser jobs can target this capability.
+
+Consumer workflows then **drop `--with-deps`** and select the `playwright` capability (still behind a
+`pick-runner` with `ubuntu-latest` fallback, where the libs ship by default).
+
+```bash
+sudo ./install.sh --broker-url "$BROKER_URL" --broker-secret "$BROKER_SECRET" \
+  --org gyeolhada-team --with-playwright --stage-python 3.13
+```
 
 ## Credentials
 Supply exactly one (priority high → low):

@@ -13,6 +13,8 @@
 #                     [--runner-base DIR] [--runner-version VERSION]
 #                     [--extra-packages "p1 p2"] [--skip-job-deps]
 #                     [--toolcache-dir DIR] [--skip-toolcache] [--stage-python VER ...]
+#                     [--with-playwright] [--playwright-version V] [--playwright-browser B]
+#                     [--playwright-browsers-path DIR]
 #                     [--no-auto-update] [--update-repo SLUG] [--update-ref REF]
 #                     [--update-min-interval SECONDS]
 #
@@ -22,6 +24,12 @@
 # (unzip/zip/xz-utils/zstd) and points the runner at a shared tool cache via AGENT_TOOLSDIRECTORY.
 # Pass --stage-python 3.13 (repeatable) to pre-stage a Python there — REQUIRED for actions/setup-python
 # on non-Ubuntu hosts (Debian etc.), which cannot download a prebuilt Python and otherwise error.
+#
+# Playwright capability: --with-playwright installs Chromium's system libraries (root apt, via
+# `playwright install-deps`) and points jobs at a shared, persistent browser cache
+# (PLAYWRIGHT_BROWSERS_PATH, baked into the unit) so `playwright install` is a fast cache hit needing
+# no root. It also appends the `playwright` label so browser jobs can target this runner. See
+# docs/fleet-design.md. Consumers drop `--with-deps` and target the `playwright` capability.
 
 set -euo pipefail
 
@@ -79,6 +87,15 @@ TOOLCACHE_DIR="${TOOLCACHE_DIR:-${DEFAULT_TOOLCACHE_DIR}}"
 SKIP_TOOLCACHE=0
 STAGE_PYTHON_VERSIONS=()
 
+# Playwright capability (opt-in via --with-playwright). PLAYWRIGHT_BROWSERS_PATH is a shared,
+# persistent cache pointed at by every job via the systemd unit; install-deps installs the system
+# libraries for PLAYWRIGHT_BROWSER (the root-requiring part). Empty version = latest.
+readonly DEFAULT_PLAYWRIGHT_BROWSERS_PATH="/opt/ms-playwright"
+WITH_PLAYWRIGHT=0
+PLAYWRIGHT_BROWSERS_PATH="${PLAYWRIGHT_BROWSERS_PATH:-${DEFAULT_PLAYWRIGHT_BROWSERS_PATH}}"
+PLAYWRIGHT_VERSION=""        # empty = latest published @playwright/test
+PLAYWRIGHT_BROWSER="chromium"
+
 # ── Arg parsing ────────────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -98,6 +115,10 @@ while [[ $# -gt 0 ]]; do
     --toolcache-dir)  TOOLCACHE_DIR="$2";   shift 2 ;;   # shared tool cache dir (AGENT_TOOLSDIRECTORY)
     --skip-toolcache) SKIP_TOOLCACHE=1;     shift   ;;   # do not create/stage the tool cache
     --stage-python)         STAGE_PYTHON_VERSIONS+=("$2"); shift 2 ;;  # repeatable: pre-stage Python <ver> (e.g. 3.13)
+    --with-playwright)          WITH_PLAYWRIGHT=1;             shift   ;;   # provision the Playwright browser capability
+    --playwright-version)       PLAYWRIGHT_VERSION="$2";       shift 2 ;;   # pin the playwright npm version (empty = latest)
+    --playwright-browser)       PLAYWRIGHT_BROWSER="$2";       shift 2 ;;   # browser to deps/pre-warm (default chromium)
+    --playwright-browsers-path) PLAYWRIGHT_BROWSERS_PATH="$2"; shift 2 ;;   # shared browser cache dir (PLAYWRIGHT_BROWSERS_PATH)
     --no-auto-update)       AUTO_UPDATE="0";        shift   ;;   # disable fleet-code auto-update on this host
     --update-repo)          UPDATE_REPO="$2";       shift 2 ;;   # source repo for raw.githubusercontent fetches
     --update-ref)           UPDATE_REF="$2";        shift 2 ;;   # pin a specific ref (empty = broker-driven)
@@ -106,6 +127,7 @@ while [[ $# -gt 0 ]]; do
        echo "Usage: sudo $0 (--token T | --broker-url URL [--broker-secret S] | --access-token PAT)" >&2
        echo "         [--org ORG] [--labels LABELS] [--count N] [--user USER] [--runner-base DIR] [--runner-version V]" >&2
        echo "         [--extra-packages \"p1 p2\"] [--skip-job-deps] [--toolcache-dir DIR] [--skip-toolcache] [--stage-python VER ...]" >&2
+       echo "         [--with-playwright] [--playwright-version V] [--playwright-browser B] [--playwright-browsers-path DIR]" >&2
        echo "         [--no-auto-update] [--update-repo SLUG] [--update-ref REF] [--update-min-interval SECONDS]" >&2
        exit 1 ;;
   esac
@@ -118,6 +140,13 @@ fatal() { echo "[ERROR] $*" >&2; exit 1; }
 # Append one KEY="value" line to a config.env. Done via a helper (not literal assignments in this
 # script) so credential values are never embedded in source and static scanners don't misfire.
 _write_kv() { printf '%s="%s"\n' "$1" "$2" >> "$3"; }
+
+# When provisioning the Playwright capability, append the `playwright` label so browser jobs can
+# target this runner (idempotent — skip if already present). Done after arg parsing so an explicit
+# --labels is respected and merely extended.
+if (( WITH_PLAYWRIGHT )) && [[ ",${RUNNER_LABELS}," != *",playwright,"* ]]; then
+  RUNNER_LABELS="${RUNNER_LABELS},playwright"
+fi
 
 # ── Preflight ──────────────────────────────────────────────────────────────────
 [[ "$(uname -s)" == "Linux" ]] || fatal "This installer is Linux-only (use ios/ for macOS)."
@@ -210,8 +239,43 @@ provision_toolcache() {
   chown -R "${RUN_USER}" "${TOOLCACHE_DIR}"
 }
 
+# ── Playwright capability — system libs (root) + shared browser cache ────────────
+# Splits Playwright's two costs (see docs/fleet-design.md): the OS browser libraries need root and
+# change rarely → install once here; the browser binaries are per-version → cache them in a shared,
+# persistent PLAYWRIGHT_BROWSERS_PATH (baked into the unit) so each job is a cache hit needing no root.
+# Drives the official `playwright` CLI so the apt set tracks the OS, rather than hardcoding a fragile
+# package list. Failures warn (not fatal): a job can still self-install at runtime, just slower.
+provision_playwright() {
+  (( WITH_PLAYWRIGHT )) || return 0
+  local pkgspec="playwright"
+  [[ -n "${PLAYWRIGHT_VERSION}" ]] && pkgspec="playwright@${PLAYWRIGHT_VERSION}"
+
+  # npx drives install-deps/install. Prefer an existing Node; apt-install nodejs/npm if absent.
+  if ! command -v npx &>/dev/null; then
+    if command -v apt-get &>/dev/null; then
+      info "Installing nodejs/npm (needed to drive 'playwright install-deps')."
+      DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends nodejs npm
+    fi
+  fi
+  command -v npx &>/dev/null || { warn "npx unavailable — skipping Playwright provisioning (install Node, then re-run)."; return 0; }
+
+  # 1. System libraries (root). install-deps resolves the correct apt set for this OS.
+  info "Installing Playwright system dependencies (${pkgspec} install-deps ${PLAYWRIGHT_BROWSER}) ..."
+  npx --yes "${pkgspec}" install-deps "${PLAYWRIGHT_BROWSER}" \
+    || warn "playwright install-deps failed — browser jobs may miss system libs."
+
+  # 2. Shared, persistent browser cache; pre-warm the browser binary into it.
+  mkdir -p "${PLAYWRIGHT_BROWSERS_PATH}"
+  info "Pre-warming ${PLAYWRIGHT_BROWSER} into ${PLAYWRIGHT_BROWSERS_PATH} ..."
+  PLAYWRIGHT_BROWSERS_PATH="${PLAYWRIGHT_BROWSERS_PATH}" npx --yes "${pkgspec}" install "${PLAYWRIGHT_BROWSER}" \
+    || warn "Playwright browser pre-warm failed — first job will populate the cache instead."
+  # The runner (RUN_USER) must read/write the shared cache; later jobs add their own pinned versions.
+  chown -R "${RUN_USER}" "${PLAYWRIGHT_BROWSERS_PATH}"
+}
+
 install_job_deps
 provision_toolcache
+provision_playwright
 
 # ── Download actions/runner tarball once (shared across instances) ─────────────
 RUNNER_TGZ="actions-runner-linux-${RUNNER_ARCH}-${RUNNER_VERSION}.tar.gz"
@@ -279,8 +343,12 @@ rm -f "${TMP_TGZ}"
 # ── Install + enable systemd template ──────────────────────────────────────────
 DEST_UNIT="/etc/systemd/system/${UNIT_NAME}"
 info "Installing systemd template → ${DEST_UNIT}"
+# Only Playwright-provisioned runners carry PLAYWRIGHT_BROWSERS_PATH; others get a blank line.
+PLAYWRIGHT_ENV_LINE=""
+(( WITH_PLAYWRIGHT )) && PLAYWRIGHT_ENV_LINE="Environment=PLAYWRIGHT_BROWSERS_PATH=${PLAYWRIGHT_BROWSERS_PATH}"
 sed -e "s|__RUNNER_BASE__|${RUNNER_BASE}|g" -e "s|__RUN_USER__|${RUN_USER}|g" \
   -e "s|__TOOLCACHE_DIR__|${TOOLCACHE_DIR}|g" \
+  -e "s|__PLAYWRIGHT_ENV__|${PLAYWRIGHT_ENV_LINE}|" \
   "${SCRIPT_DIR}/${SERVICE_NAME}" > "${DEST_UNIT}"
 systemctl daemon-reload
 for i in $(seq 1 "${COUNT}"); do
@@ -292,6 +360,7 @@ echo ""
 echo "==========================================================="
 echo " light runners installed: ${COUNT} instance(s) under ${RUNNER_BASE}"
 echo " Run user : ${RUN_USER}    Org: ${GH_ORG}    Labels: ${RUNNER_LABELS}"
+(( WITH_PLAYWRIGHT )) && echo " Playwright: capability ON — browser cache ${PLAYWRIGHT_BROWSERS_PATH} (label 'playwright')"
 echo "==========================================================="
 echo " Status : systemctl status 'gh-runner-${RUNNER_TYPE}@*'"
 echo " Logs   : journalctl -u 'gh-runner-${RUNNER_TYPE}@1' -f"
