@@ -54,6 +54,7 @@ light and supabase runners share a host), and enables `gh-runner-light@1 .. gh-r
 | `--owner` | host short name | `<id>` in the runner name `gh-runner-light-<id>-<n>` (use a username on a shared fleet) |
 | `--runner-base` | `/opt/gh-runner-light` | Parent dir; instance `i` lives at `<base>/<i>` |
 | `--runner-version` | pinned | Bump when GitHub rejects the pinned version |
+| `--runner-type` | `light` | Type segment of the name/label/base/unit — set `playwright` for a dedicated browser runner that won't collide with the plain light runners |
 | `--extra-packages` | — | Extra apt packages to install ahead of time (e.g. `"ripgrep make"`) |
 | `--skip-job-deps` | off | Don't install the job-runtime OS baseline |
 | `--toolcache-dir` | `/opt/hostedtoolcache` | Shared tool cache (`AGENT_TOOLSDIRECTORY`) |
@@ -96,10 +97,22 @@ provisions this once at install time and splits the two costs (see `docs/fleet-d
 Consumer workflows then **drop `--with-deps`** and select the `playwright` capability (still behind a
 `pick-runner` with `ubuntu-latest` fallback, where the libs ship by default).
 
+**Dedicated browser runner** — to keep browser jobs off the plain `light` runners, give it
+`--runner-type playwright`. It registers as `gh-runner-playwright-<owner>-<n>`, carries only the
+`playwright` label (not `light`), and installs under its own unit/base so it never collides with the
+light runners:
+
 ```bash
+# plain light runners (×2)
 sudo ./install.sh --broker-url "$BROKER_URL" --broker-secret "$BROKER_SECRET" \
-  --org gyeolhada-team --with-playwright --stage-python 3.13
+  --org gyeolhada-team --count 2 --stage-python 3.13
+# dedicated playwright runner (×1) — own unit gh-runner-playwright@, base /opt/gh-runner-playwright
+sudo ./install.sh --broker-url "$BROKER_URL" --broker-secret "$BROKER_SECRET" \
+  --org gyeolhada-team --runner-type playwright --with-playwright --count 1 --stage-python 3.13
 ```
+
+To instead make the existing light runners browser-capable (no separate runner), just add
+`--with-playwright` to the light install — they keep the `light` label and gain `playwright`.
 
 ## Credentials
 Supply exactly one (priority high → low):
