@@ -553,14 +553,14 @@ def test_redis_store_snapshot_surfaces_fleet_version_per_runner():
 
     fake = FakeRedisHttp(
         results=[
-            [],                 # count_type
-            [],                 # count_host
+            [],  # count_type
+            [],  # count_host
             count_runner_flat,  # count_runner
-            [],                 # last_type
-            [],                 # last_host
-            [],                 # last_runner
-            "1699999999",       # since
-            fleetver_flat,      # fleetver:runner
+            [],  # last_type
+            [],  # last_host
+            [],  # last_runner
+            "1699999999",  # since
+            fleetver_flat,  # fleetver:runner
         ]
     )
     store = RedisStatsStore(url="https://redis.example.com", token="tok", http=fake)
