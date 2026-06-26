@@ -204,16 +204,31 @@ def test_redis_store_snapshot_parses_pipeline_response():
     # and a since value. Simulates two runner types: light (5 tokens) and supabase (1 remove-token).
     count_type_flat = ["light:token", "5", "supabase:remove-token", "1"]
     count_host_flat = ["my-host:token", "5", "my-host:remove-token", "1"]
+    # Per-runner: one light runner with 5 tokens, one supabase runner with 1 remove-token.
+    count_runner_flat = [
+        "gh-runner-light-my-host-1:token",
+        "5",
+        "gh-runner-supabase-my-host-1:remove-token",
+        "1",
+    ]
     last_type_flat = ["light", "1700000000", "supabase", "1700000100"]
     last_host_flat = ["my-host", "1700000100"]
+    last_runner_flat = [
+        "gh-runner-light-my-host-1",
+        "1700000000",
+        "gh-runner-supabase-my-host-1",
+        "1700000100",
+    ]
     since_val = "1699999999"
 
     fake = FakeRedisHttp(
         results=[
             count_type_flat,
             count_host_flat,
+            count_runner_flat,
             last_type_flat,
             last_host_flat,
+            last_runner_flat,
             since_val,
         ]
     )
@@ -230,6 +245,15 @@ def test_redis_store_snapshot_parses_pipeline_response():
     assert snap["by_host"]["my-host"]["token"] == 5
     assert snap["by_host"]["my-host"]["remove-token"] == 1
     assert snap["since"] is not None  # ISO string from since_val
+
+    # Per-runner breakdown: derived type/host from the name, sorted most-recent first.
+    runners = {r["name"]: r for r in snap["runners"]}
+    assert runners["gh-runner-light-my-host-1"]["token"] == 5
+    assert runners["gh-runner-light-my-host-1"]["type"] == "light"
+    assert runners["gh-runner-light-my-host-1"]["host"] == "my-host"
+    assert runners["gh-runner-supabase-my-host-1"]["remove-token"] == 1
+    # supabase runner has the later last_seen, so it sorts first.
+    assert snap["runners"][0]["name"] == "gh-runner-supabase-my-host-1"
 
 
 def test_redis_store_record_swallows_errors():
@@ -259,24 +283,27 @@ class FakeSupabaseHttp:
         return self._responses.get(path)
 
 
-def test_supabase_store_record_issues_two_rpc_calls():
+def test_supabase_store_record_issues_three_rpc_calls():
     fake = FakeSupabaseHttp(responses={"/rest/v1/rpc/record_runner_event": None})
     store = SupabaseStatsStore(url="https://proj.supabase.co", service_key="svckey", http=fake)
     asyncio.run(store.record("token", "gh-runner-light-my-host-1"))
 
     rpc_calls = [c for c in fake.calls if c[1] == "/rest/v1/rpc/record_runner_event"]
-    assert len(rpc_calls) == 2, f"expected 2 RPC calls, got {len(rpc_calls)}: {rpc_calls}"
+    assert len(rpc_calls) == 3, f"expected 3 RPC calls, got {len(rpc_calls)}: {rpc_calls}"
 
     dims = {c[2]["json"]["p_dimension"] for c in rpc_calls}
-    assert dims == {"type", "host"}, f"unexpected dimensions: {dims}"
+    assert dims == {"type", "host", "runner"}, f"unexpected dimensions: {dims}"
 
     type_call = next(c for c in rpc_calls if c[2]["json"]["p_dimension"] == "type")
     host_call = next(c for c in rpc_calls if c[2]["json"]["p_dimension"] == "host")
+    runner_call = next(c for c in rpc_calls if c[2]["json"]["p_dimension"] == "runner")
 
     assert type_call[2]["json"]["p_key"] == "light"
     assert type_call[2]["json"]["p_kind"] == "token"
     assert host_call[2]["json"]["p_key"] == "my-host"
     assert host_call[2]["json"]["p_kind"] == "token"
+    assert runner_call[2]["json"]["p_key"] == "gh-runner-light-my-host-1"
+    assert runner_call[2]["json"]["p_kind"] == "token"
 
 
 def test_supabase_store_snapshot_parses_rows():
@@ -310,6 +337,13 @@ def test_supabase_store_snapshot_parses_rows():
             "count": 1,
             "last_seen": "2026-06-25T09:00:00+00:00",
         },
+        {
+            "dimension": "runner",
+            "key": "gh-runner-light-my-host-1",
+            "kind": "token",
+            "count": 5,
+            "last_seen": "2026-06-25T08:00:00+00:00",
+        },
     ]
     meta_rows = [{"since": "2026-06-01T00:00:00+00:00"}]
 
@@ -332,6 +366,12 @@ def test_supabase_store_snapshot_parses_rows():
     assert snap["by_host"]["my-host"]["token"] == 5
     assert snap["by_host"]["my-host"]["remove-token"] == 1
     assert snap["since"] == "2026-06-01T00:00:00+00:00"
+
+    # Per-runner breakdown, with type/host derived from the name.
+    runners = {r["name"]: r for r in snap["runners"]}
+    assert runners["gh-runner-light-my-host-1"]["token"] == 5
+    assert runners["gh-runner-light-my-host-1"]["type"] == "light"
+    assert runners["gh-runner-light-my-host-1"]["host"] == "my-host"
 
 
 def test_supabase_store_record_swallows_errors():
