@@ -32,3 +32,6 @@ _diag/
 .DS_Store
 __pycache__/
 *.pyc
+
+# Local dev worktrees (dev-loop)
+/.worktrees/
