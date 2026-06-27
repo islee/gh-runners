@@ -86,22 +86,50 @@ for TYPE in light supabase ios; do
   echo "[INFO]  Wrote ${TYPE}/.fleet-manifest (version=${VERSION})"
 done
 
+# ── Docker-variant manifests ────────────────────────────────────────────────────
+# Docker runners run a DIFFERENT payload than the native runner of the same type, so they carry their
+# own manifest under a "<type>-docker" broker key. Managed set = the single swappable payload
+# (runner-payload.sh); bootstrap.sh is the baked-in trust root and must NEVER be listed.
+readonly -a DOCKER_MANAGED_FILES=("runner-payload.sh")
+declare -A DOCKER_MANIFEST_HASHES
+
+# shellcheck disable=SC2043  # single-element on purpose — a loop so adding e.g. `supabase` is one word
+for DTYPE in light; do
+  DDIR="${SCRIPT_DIR}/${DTYPE}/docker"
+  DMANIFEST="${DDIR}/.fleet-manifest"
+  for F in "${DOCKER_MANAGED_FILES[@]}"; do
+    [[ -f "${DDIR}/${F}" ]] || { echo "[ERROR] ${DTYPE}/docker/${F} not found." >&2; exit 1; }
+  done
+  {
+    printf 'version=%s\n' "${VERSION}"
+    printf '# sha256  basename — CODE files only; authoritative for the full managed set (docker variant)\n'
+    printf '# CRITICAL: bootstrap.sh is the stable trust root and must NEVER appear here.\n'
+    for F in "${DOCKER_MANAGED_FILES[@]}"; do
+      HASH="$(_sha256_file "${DDIR}/${F}")"
+      printf '%s  %s\n' "${HASH}" "${F}"
+    done
+  } > "${DMANIFEST}"
+  DOCKER_MANIFEST_HASHES["${DTYPE}-docker"]="$(_sha256_file "${DMANIFEST}")"
+  echo "[INFO]  Wrote ${DTYPE}/docker/.fleet-manifest (version=${VERSION})"
+done
+
 # ── Print operator output ──────────────────────────────────────────────────────
 TAG="fleet-${VERSION}"
 
 echo ""
 echo "=== manifest sha256 map (set on broker as FLEET_MANIFEST_SHA256 per type) ==="
 printf '{\n'
-printf '  "light":    "%s",\n' "${MANIFEST_HASHES[light]}"
-printf '  "supabase": "%s",\n' "${MANIFEST_HASHES[supabase]}"
-printf '  "ios":      "%s"\n'  "${MANIFEST_HASHES[ios]}"
+printf '  "light":        "%s",\n' "${MANIFEST_HASHES[light]}"
+printf '  "supabase":     "%s",\n' "${MANIFEST_HASHES[supabase]}"
+printf '  "ios":          "%s",\n' "${MANIFEST_HASHES[ios]}"
+printf '  "light-docker": "%s"\n'  "${DOCKER_MANIFEST_HASHES[light-docker]}"
 printf '}\n'
 echo ""
 echo "=== suggested git tag ==="
 echo "  ${TAG}"
 echo ""
 echo "=== next steps ==="
-echo "  1. git add light/.fleet-manifest supabase/.fleet-manifest ios/.fleet-manifest"
+echo "  1. git add light/.fleet-manifest supabase/.fleet-manifest ios/.fleet-manifest light/docker/.fleet-manifest"
 echo "  2. git commit -m 'release: fleet-code ${VERSION}'"
 echo "  3. git push origin main"
 echo "  4. Wait ~60s for raw.githubusercontent.com CDN propagation."

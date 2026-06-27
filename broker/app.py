@@ -24,6 +24,7 @@ import hmac
 import json
 import logging
 import os
+import re
 import time
 from datetime import datetime, timezone
 from typing import Any
@@ -92,6 +93,13 @@ if _fleet_manifest_raw:
         log.warning(
             "FLEET_MANIFEST_SHA256 is not valid JSON — fleet_update dormant for all runner types"
         )
+
+# Fleet variant validation. Docker-variant runners run different payloads than native runners of
+# the same type, so they resolve a different manifest hash under a `<type>-<variant>` key.
+# WHY restrict charset: an unchecked header value could forge arbitrary map keys; [a-z0-9-] keeps
+# the key space predictable and matches typical Docker/OCI tag conventions.
+_VARIANT_RE = re.compile(r"^[a-z0-9-]+$")
+_VARIANT_MAX_LEN = 32
 
 # Background task set: keeps asyncio.Task references alive until they complete so fire-and-forget
 # persistence calls are not garbage-collected mid-flight.
@@ -682,19 +690,38 @@ def _persist(kind: str, name: str | None, fleet_version: str | None = None) -> N
     t.add_done_callback(_bg_tasks.discard)
 
 
-def _fleet_update_for(rtype: str) -> dict | None:
-    """Build the fleet_update payload for the given runner type.
+def _parse_fleet_variant(raw: str | None) -> str | None:
+    """Validate the X-Fleet-Variant header value; return None if absent or invalid.
 
-    Returns a dict with desired_ref, manifest_sha256, and min_version ONLY when
-    FLEET_DESIRED_REF is set AND the type has an entry in the parsed manifest map.
-    Returns None otherwise so the caller can omit the key entirely — keeping /token
-    backward-compatible when the feature is not configured or the type is not yet enrolled.
+    Valid charset: [a-z0-9-], max 32 chars. A malformed or oversized variant is treated as
+    absent — a weird header must never forge a manifest-map lookup key.
     """
-    if not FLEET_DESIRED_REF or rtype not in _fleet_manifest_map:
+    if not raw:
+        return None
+    if len(raw) > _VARIANT_MAX_LEN or not _VARIANT_RE.match(raw):
+        return None
+    return raw
+
+
+def _fleet_update_for(rtype: str, variant: str | None = None) -> dict | None:
+    """Build the fleet_update payload for the given runner type (and optional variant).
+
+    The manifest-map lookup key is `<type>-<variant>` when a valid variant is present,
+    or just `<type>` when absent. There is NO fallback: if the variant-keyed entry is not in
+    the map, None is returned and no fleet_update is emitted. This is the correct fail-safe —
+    a docker runner stays dormant until its `light-docker` entry is enrolled in the map.
+
+    Returns None (key omitted) when FLEET_DESIRED_REF is unset (feature dormant) or the
+    resolved key has no map entry. Backward-compatible: callers without a variant behave as before.
+    """
+    if not FLEET_DESIRED_REF:
+        return None
+    key = f"{rtype}-{variant}" if variant else rtype
+    if key not in _fleet_manifest_map:
         return None
     return {
         "desired_ref": FLEET_DESIRED_REF,
-        "manifest_sha256": _fleet_manifest_map[rtype],
+        "manifest_sha256": _fleet_manifest_map[key],
         "min_version": FLEET_MIN_VERSION,
     }
 
@@ -858,25 +885,29 @@ async def token(
     authorization: str | None = Header(default=None),
     x_runner_name: str | None = Header(default=None),
     x_fleet_version: str | None = Header(default=None),
+    x_fleet_variant: str | None = Header(default=None),
 ) -> dict:
     _rate_limit(request)
     _check_auth(authorization)
     d = await _mint("registration-token")
     _persist("token", x_runner_name, fleet_version=x_fleet_version)
     log.info(
-        "minted registration token for runner=%s fleet_version=%s",
+        "minted registration token for runner=%s fleet_version=%s fleet_variant=%s",
         x_runner_name or "?",
         x_fleet_version or "?",
+        x_fleet_variant or "?",
     )
     resp: dict = {
         "token": d["token"],
         "expires_at": d["expires_at"],
         "url": f"https://github.com/{ORG}",
     }
-    # Append fleet_update ONLY when the feature is configured for this runner type. Omit the
-    # key entirely (don't emit null) so older runners that don't know this field are unaffected.
+    # Append fleet_update ONLY when the feature is configured for this runner type+variant. Omit
+    # the key entirely (don't emit null) so older runners that don't know this field are unaffected.
+    # WHY validate variant before lookup: an unchecked header could forge arbitrary map keys.
     rtype = parse_runner_name(x_runner_name)[0]
-    fleet_update = _fleet_update_for(rtype)
+    variant = _parse_fleet_variant(x_fleet_variant)
+    fleet_update = _fleet_update_for(rtype, variant)
     if fleet_update is not None:
         resp["fleet_update"] = fleet_update
     return resp
