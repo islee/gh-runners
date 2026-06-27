@@ -30,6 +30,12 @@ WorkingDirectory=__RUNNER_BASE__/%i
 # tools from a shared, persistent cache (hosted-runner parity). REQUIRED for setup-python on
 # non-Ubuntu hosts, which can't download a prebuilt Python. install.sh substitutes the path.
 Environment=AGENT_TOOLSDIRECTORY=__TOOLCACHE_DIR__
+# CRITICAL — per-instance HOME. Co-hosted runners run as the SAME user, so a single shared HOME means
+# concurrent jobs race on per-user caches: pnpm/action-setup (/setup-pnpm), setup-node's registry-auth
+# .npmrc, and the deno/pip/npm caches. That race already corrupted pnpm's install (empty dist/worker.js)
+# fleet-wide. Giving each instance %i its own HOME isolates those caches. install.sh creates the dir.
+# (The shared toolcache + Playwright browser cache stay shared on purpose — set via their own env.)
+Environment=HOME=__RUNNER_BASE__/%i/home
 # Playwright capability (only when installed with --with-playwright): points every job at a shared,
 # persistent browser cache so `playwright install` is a cache hit and needs no root. Blank otherwise.
 __PLAYWRIGHT_ENV__
