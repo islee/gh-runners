@@ -1,7 +1,9 @@
 # Containerized "light" runner — one container per job (ephemeral), re-spawned by restart: always.
 #
-# Scale to N concurrent runners with:  docker compose up -d --build --scale runner=2
-# (no container_name / no published ports, so scaling is safe.)
+# Run N distinct runners (sequential gh-runner-light-<owner>-<n> names) with one project + RUNNER_NUMBER
+# per instance:  RUNNER_NUMBER=1 docker compose -p ghr-light-1 up -d ; RUNNER_NUMBER=2 ... -p ghr-light-2 ...
+# NOTE: `--scale runner=N` does NOT work when OWNER is set in .env — all replicas get the same
+# RUNNER_NUMBER, so they register the same name and ephemeral --replace makes them fight over one slot.
 #
 # Credentials: copy env.example -> .env and set ONE of RUNNER_TOKEN / BROKER_URL(+BROKER_SECRET) /
 # ACCESS_TOKEN. .env is gitignored.
@@ -17,6 +19,14 @@ services:
       # Defaults if not set in .env. RUNNER_LABELS must match the workflow's runs-on:.
       GH_ORG: ${GH_ORG:-your-org}
       RUNNER_LABELS: ${RUNNER_LABELS:-self-hosted,linux,x64,light}
+      # RUNNER_NUMBER is listed here (not only via env_file) so it's SHELL-overridable for running
+      # multiple distinct instances on one host with sequential gh-runner-light-<owner>-<n> names:
+      #   RUNNER_NUMBER=1 docker compose -p ghr-light-1 up -d
+      #   RUNNER_NUMBER=2 docker compose -p ghr-light-2 up -d
+      # `environment` wins over env_file, so the shell value overrides .env's. Without this every
+      # container reads the same RUNNER_NUMBER from .env → same name → ephemeral --replace makes them
+      # fight over ONE registration instead of running as N runners. (OWNER stays from .env.)
+      RUNNER_NUMBER: ${RUNNER_NUMBER:-1}
     # One job per container, then exit; restart brings up a fresh one to re-register.
     restart: always
     # Resource caps (Compose v2 standalone top-level keys; deploy.resources is swarm-only/ignored).
