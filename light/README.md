@@ -123,6 +123,14 @@ Supply exactly one (priority high → low):
 | **B — broker** | `--broker-url` + `--broker-secret` | Recommended. No GitHub credential on the host; the [token-broker](https://github.com/islee/gh-runners/tree/main/broker) mints fresh tokens. |
 | **C — PAT** | `--access-token` | Unattended without a broker. Fine-grained PAT, `organization_self_hosted_runners` scope only — **never an admin PAT**. |
 
+## Concurrency isolation (per-instance HOME)
+Co-hosted instances run as the **same user**, so each gets its **own `HOME`** at `<runner-base>/<i>/home`
+(baked into the unit, created by `install.sh`). Without this, concurrent jobs race on shared per-user
+caches — `pnpm/action-setup`'s install dir, `setup-node`'s registry-auth `.npmrc`, and the
+deno/pip/npm caches — which has corrupted pnpm fleet-wide. The shared tool cache
+(`AGENT_TOOLSDIRECTORY`) and Playwright browser cache stay shared on purpose (concurrency-tolerant /
+read-mostly). Trade-off: per-instance caches use more disk and aren't shared across instances.
+
 ## Operate
 ```bash
 systemctl status 'gh-runner-light@*'        # all instances

@@ -30,6 +30,11 @@ WorkingDirectory=__RUNNER_BASE__/%i
 # tools from a shared, persistent cache (hosted-runner parity). REQUIRED for setup-python on
 # non-Ubuntu hosts, which can't download a prebuilt Python. install.sh substitutes the path.
 Environment=AGENT_TOOLSDIRECTORY=__TOOLCACHE_DIR__
+# CRITICAL — per-instance HOME. Co-hosted runners run as the SAME user; a single shared HOME means
+# concurrent jobs race on per-user caches (pnpm/action-setup, setup-node's registry-auth .npmrc, the
+# deno/pip/npm caches) — that race corrupted pnpm fleet-wide. Per-instance %i HOME isolates them.
+# install.sh creates the dir. The shared toolcache stays shared on purpose (its own env above).
+Environment=HOME=__RUNNER_BASE__/%i/home
 ExecStart=/bin/bash __RUNNER_BASE__/%i/runner-bootstrap.sh
 Restart=always
 RestartSec=10

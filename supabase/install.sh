@@ -226,6 +226,9 @@ for i in $(seq 1 "${COUNT}"); do
   INST_DIR="${RUNNER_BASE}/${i}"
   info "Setting up instance ${i} → ${INST_DIR}"
   mkdir -p "${INST_DIR}"
+  # Per-instance HOME (see gh-runner@.service): isolates per-user caches so concurrent runners on the
+  # same user don't race/corrupt pnpm's setup cache, the registry-auth .npmrc, or deno/pip/npm caches.
+  mkdir -p "${INST_DIR}/home"
   tar -xzf "${TMP_TGZ}" -C "${INST_DIR}"
 
   # WHY: config.sh refuses to register ("already configured") if stale local registration files
