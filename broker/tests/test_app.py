@@ -568,3 +568,109 @@ def test_redis_store_snapshot_surfaces_fleet_version_per_runner():
 
     runner = next(r for r in snap["runners"] if r["name"] == "gh-runner-light-my-host-1")
     assert runner.get("fleet_version") == "2026.06.26.1", f"unexpected runner: {runner}"
+
+
+# --- fleet variant (X-Fleet-Variant) -----------------------------------------------------------
+
+
+def test_fleet_update_docker_variant_with_matching_key(monkeypatch):
+    """variant=docker + 'light-docker' in map → fleet_update carries the docker-variant hash."""
+    monkeypatch.setattr(appmod, "FLEET_DESIRED_REF", "v2026.06.26.1")
+    monkeypatch.setattr(
+        appmod,
+        "_fleet_manifest_map",
+        {"light": "nativehash000000", "light-docker": "dockerhash111111"},
+    )
+    monkeypatch.setattr(appmod, "FLEET_MIN_VERSION", "2026.06.26.1")
+    monkeypatch.setattr(appmod, "_mint", _fake_mint)
+
+    r = client.post(
+        "/token",
+        headers={
+            "Authorization": "Bearer test-broker-secret",
+            "X-Runner-Name": "gh-runner-light-host-1",
+            "X-Fleet-Variant": "docker",
+        },
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert "fleet_update" in body, f"expected fleet_update in {body}"
+    assert body["fleet_update"]["manifest_sha256"] == "dockerhash111111"
+    assert body["fleet_update"]["desired_ref"] == "v2026.06.26.1"
+
+
+def test_fleet_update_docker_variant_no_fallback(monkeypatch):
+    """variant=docker but only 'light' in map → NO fleet_update (no fallback to native key)."""
+    monkeypatch.setattr(appmod, "FLEET_DESIRED_REF", "v2026.06.26.1")
+    monkeypatch.setattr(
+        appmod,
+        "_fleet_manifest_map",
+        {"light": "nativehash000000"},
+    )
+    monkeypatch.setattr(appmod, "_mint", _fake_mint)
+
+    r = client.post(
+        "/token",
+        headers={
+            "Authorization": "Bearer test-broker-secret",
+            "X-Runner-Name": "gh-runner-light-host-1",
+            "X-Fleet-Variant": "docker",
+        },
+    )
+    assert r.status_code == 200
+    assert (
+        "fleet_update" not in r.json()
+    ), f"docker variant must not fall back to native key: {r.json()}"
+
+
+def test_fleet_update_no_variant_uses_type_key(monkeypatch):
+    """No X-Fleet-Variant header → lookup key is bare type; backward-compatible with existing hash."""
+    monkeypatch.setattr(appmod, "FLEET_DESIRED_REF", "v2026.06.26.1")
+    monkeypatch.setattr(
+        appmod,
+        "_fleet_manifest_map",
+        {"light": "nativehash000000", "light-docker": "dockerhash111111"},
+    )
+    monkeypatch.setattr(appmod, "FLEET_MIN_VERSION", None)
+    monkeypatch.setattr(appmod, "_mint", _fake_mint)
+
+    r = client.post(
+        "/token",
+        headers={
+            "Authorization": "Bearer test-broker-secret",
+            "X-Runner-Name": "gh-runner-light-host-1",
+            # NOTE: no X-Fleet-Variant header
+        },
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert "fleet_update" in body, f"expected fleet_update for native runner in {body}"
+    assert body["fleet_update"]["manifest_sha256"] == "nativehash000000"
+
+
+def test_fleet_update_malformed_variant_treated_as_absent(monkeypatch):
+    """Malformed X-Fleet-Variant (e.g. 'Docker!') is discarded; lookup falls back to bare type key.
+
+    Here only 'light-docker' is in the map, so a malformed variant that collapses to the bare
+    'light' key finds no entry → no fleet_update. This proves the invalid header is ignored.
+    """
+    monkeypatch.setattr(appmod, "FLEET_DESIRED_REF", "v2026.06.26.1")
+    monkeypatch.setattr(
+        appmod,
+        "_fleet_manifest_map",
+        {"light-docker": "dockerhash111111"},
+    )
+    monkeypatch.setattr(appmod, "_mint", _fake_mint)
+
+    r = client.post(
+        "/token",
+        headers={
+            "Authorization": "Bearer test-broker-secret",
+            "X-Runner-Name": "gh-runner-light-host-1",
+            "X-Fleet-Variant": "Docker!",  # uppercase + punctuation → invalid
+        },
+    )
+    assert r.status_code == 200
+    assert (
+        "fleet_update" not in r.json()
+    ), f"malformed variant must be treated as absent: {r.json()}"

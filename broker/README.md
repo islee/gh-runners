@@ -172,11 +172,26 @@ When `FLEET_DESIRED_REF` is set and `FLEET_MANIFEST_SHA256` maps the runner's ty
 When `FLEET_DESIRED_REF` is unset (default) the broker behaves exactly as before — no
 `fleet_update` key in the response and no behaviour change for runners that predate this feature.
 
-### New request header
+### New request headers
 
 | Header | Direction | Purpose |
 |--------|-----------|---------|
 | `X-Fleet-Version` | runner → broker | Current fleet-code version on the runner; logged and stored in `/stats.activity.runners[].fleet_version`. |
+| `X-Fleet-Variant` | runner → broker | Runner payload variant (e.g. `docker`). When present, the manifest-map lookup key becomes `<type>-<variant>` (e.g. `light-docker`) instead of bare `<type>`. Absent by default. |
+
+### Variant-keyed manifest map
+
+Docker-variant runners of a given type run a **different payload** than native runners of the same
+type (e.g. native `light` runs `runner-loop.sh`; docker `light` runs a container entrypoint). They
+therefore need a different manifest hash. Use a `<type>-<variant>` key in `FLEET_MANIFEST_SHA256`:
+
+```json
+{"light": "<hex>", "light-docker": "<hex>", "supabase": "<hex>"}
+```
+
+The broker does **not fall back** from `light-docker` to `light`. If the variant-keyed entry is
+absent from the map, `fleet_update` is omitted — the runner stays dormant until its variant entry
+is enrolled. This is the correct fail-safe.
 
 ### Fleet-version observability in `/stats`
 
@@ -204,7 +219,7 @@ See [`env.example`](env.example) for the full reference with comments. In brief:
 | Var | Purpose |
 |-----|---------|
 | `FLEET_DESIRED_REF` | Git tag runners should track (e.g. `v2026.06.26.1`). Feature dormant when unset. |
-| `FLEET_MANIFEST_SHA256` | JSON object `{"light":"<hex>","supabase":"<hex>","ios":"<hex>"}` mapping runner type → sha256 of its `.fleet-manifest`. Computed by `release.sh`. |
+| `FLEET_MANIFEST_SHA256` | JSON object mapping key → sha256. Keys are bare type (`"light"`) for native runners or `"<type>-<variant>"` (`"light-docker"`) for variant runners. Computed by `release.sh`. |
 | `FLEET_MIN_VERSION` | Advisory floor string passed through to runners. Never forces an update. |
 
 ## Credentials & security

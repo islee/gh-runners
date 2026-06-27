@@ -23,8 +23,14 @@ RUN apt-get update && \
         curl jq ca-certificates zip xz-utils zstd && \
     rm -rf /var/lib/apt/lists/*
 
-COPY entrypoint.sh /opt/entrypoint.sh
-RUN chmod +x /opt/entrypoint.sh
+COPY bootstrap.sh /opt/bootstrap.sh
+COPY runner-payload.sh /opt/runner-payload.sh
+COPY .fleet-manifest /opt/.fleet-manifest
+RUN chmod +x /opt/bootstrap.sh /opt/runner-payload.sh
+
+# WHY ENV: makes UPDATE_REPO inspectable via `docker inspect` and overridable per-compose service
+# without having to rebuild. bootstrap.sh reads this at startup.
+ENV UPDATE_REPO=islee/gh-runners
 
 USER runner
-ENTRYPOINT ["/opt/entrypoint.sh"]
+ENTRYPOINT ["/opt/bootstrap.sh"]

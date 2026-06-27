@@ -37,7 +37,30 @@ Set exactly one in `.env` (priority high → low):
   (`:latest` is a moving target for an image that runs PR code).
 - First-build TODO: confirm the runner home path with
   `docker run --rm ghcr.io/actions/actions-runner ls /home/runner` (should show `config.sh`/`run.sh`);
-  update `RUNNER_HOME` in `entrypoint.sh` if different.
+  update `RUNNER_HOME` in `runner-payload.sh` if different.
+
+## Fleet self-update
+
+On each container start, `bootstrap.sh` (the stable ENTRYPOINT) checks for a `fleet_update` object
+in the broker `/token` response. If present, it fetches `light/docker/.fleet-manifest` from the
+declared `desired_ref`, verifies its sha256 against the broker-supplied `manifest_sha256` (the
+out-of-repo trust anchor), downloads and verifies `runner-payload.sh`, then execs the staged copy.
+
+| Env var | Default | Effect |
+|---------|---------|--------|
+| `AUTO_UPDATE` | `1` | Set to `0` to always use the baked-in payload (disables self-update). |
+| `UPDATE_REPO` | `islee/gh-runners` | Source repo for manifest and payload downloads. |
+
+**Fail-safe:** any failure in the update path (network, hash mismatch, bad manifest, disallowed
+path) logs a warning and falls back to the baked-in `runner-payload.sh`. A job is never blocked
+by an update failure.
+
+**Broker requirement:** the broker must include `fleet_update.manifest_sha256` in the `/token`
+response (e.g. via a `FLEET_MANIFEST_SHA256` config keyed to `light-docker`) for updates to
+flow. Without it, the runner silently uses the baked-in payload — always safe.
+
+**What is updatable:** only `runner-payload.sh`. `bootstrap.sh` is the trust root and is never
+in the manifest or subject to self-update; rebuild the image to update it.
 
 ## Security
 Ephemeral container per job; least-privilege credential (model B or scoped PAT, never admin);
