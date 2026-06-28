@@ -1,4 +1,4 @@
-version=2026.06.26.1
+version=2026.06.28.1
 # sha256  basename — CODE files only; authoritative for the full managed set (docker variant)
 # CRITICAL: bootstrap.sh is the stable trust root and must NEVER appear here.
 5ec8469e51f9ba4460bfcd0ad2707151b1b2a519bf21f37b4d379384ba513fed  runner-payload.sh

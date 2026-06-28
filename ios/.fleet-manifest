@@ -1,4 +1,4 @@
-version=2026.06.26.1
+version=2026.06.28.1
 # sha256  basename — CODE files only; authoritative for the full managed set
-a97dee111579b1dffec3b80a6fa4432f8478aac092644a5c3e711145956ac364  runner-loop.sh
+987e4f6322eb3398e1ae68fe3556fae9ade7b893c9669455ce469fea61b68795  runner-loop.sh
 55cd2f2b7dde5addcdd2b99dce755287970fa104679d72f5827cc41750c85be6  self-update.sh
