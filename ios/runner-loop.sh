@@ -58,7 +58,9 @@ fi
 # WHY: these defaults are only reached if config.env is missing a field (e.g. manually edited).
 # Normal installs always write all fields via install.sh.
 GH_ORG="${GH_ORG:-your-org}"
-RUNNER_LABELS="${RUNNER_LABELS:-self-hosted,mobile,ios,android}"
+# NOTE: 'android' is opt-in, not default — see config.env.example/README (avoids colliding with a
+# dedicated android runner on '[self-hosted, mobile, android]' jobs).
+RUNNER_LABELS="${RUNNER_LABELS:-self-hosted,mobile,ios}"
 # Display name: install.sh writes the gh-runner-ios-<id>-<n> name into config.env. Fallback to a
 # host+uuid name if unset. Fixed per machine — re-register each ephemeral cycle with --replace.
 RUNNER_NAME="${RUNNER_NAME:-$(hostname -s)-mobile-$(uuidgen | tr -d - | cut -c1-8)}"

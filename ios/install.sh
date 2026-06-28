@@ -32,7 +32,8 @@ set -euo pipefail
 readonly DEFAULT_RUNNER_VERSION="2.335.1"
 # WHY: placeholder org — operators set this at install time via --org or GH_ORG env var.
 readonly DEFAULT_ORG="your-org"
-readonly DEFAULT_LABELS="self-hosted,mobile,ios,android"
+# 'android' is opt-in (Android-on-Mac requires SDK+AVD provisioning) — pass --labels to add it.
+readonly DEFAULT_LABELS="self-hosted,mobile,ios"
 readonly DEFAULT_RUNNER_DIR="${HOME}/actions-runner-e2e"
 # NOTE: the source template file is always com.example.gh-runner.plist; the Label inside it is
 # substituted to SERVICE_LABEL at install time so multiple runners can coexist on one Mac.

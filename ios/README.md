@@ -27,6 +27,11 @@ This directory is self-contained — copy it to any Mac and run `install.sh`.
   avdmanager create avd -n gh-runner-arm64 -k "system-images;android-34;google_apis;arm64-v8a"
   ```
 - Headless AVD start: `emulator -avd gh-runner-arm64 -no-window -no-audio`
+- **Opt into the label:** the base install registers `self-hosted,mobile,ios` only — `android` is
+  NOT a default. Once the SDK + AVD above are in place, add it explicitly so this Mac serves
+  Android CI: `install.sh ... --labels "self-hosted,mobile,ios,android"`. Leaving it off keeps
+  Android `[self-hosted, mobile, android]` jobs on a dedicated android runner (one with a
+  per-job emulator) instead of landing here without a device — `adb: command not found`.
 
 ---
 
@@ -65,7 +70,7 @@ code, write issues, or access repository secrets.
 # Override other defaults if needed
 ./install.sh --org your-org --access-token ghp_... \
   --owner my-mac \                          # <id> in the runner name gh-runner-ios-<id>-1
-  --labels "self-hosted,mobile,ios,android" \
+  --labels "self-hosted,mobile,ios,android" \  # add 'android' ONLY if Android-on-Mac is provisioned (default: ios only)
   --runner-dir ~/actions-runner-e2e \
   --service-label com.acme.gh-runner \      # optional: customize the LaunchAgent label
   --allow-battery       # not recommended; see Battery section below
