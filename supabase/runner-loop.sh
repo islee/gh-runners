@@ -193,11 +193,33 @@ _record_job_complete() {
   log "Crash counter cleared and last_good/ snapshot updated post-job."
 }
 
+# ── Post-job disk reclaim — keep the shared Docker host from filling between jobs ──────────────
+# WHY: instances co-located on one host (e.g. CT 102: light×4 + supabase + the android container)
+# share /var/lib/docker. Jobs that build images or run `supabase start` leave dangling images and
+# build cache that, left unchecked, fill the rootfs until the next emulator boot can't create its
+# 7 GB userdata partition. Pruning after every job keeps it bounded with no manual intervention.
+# CRITICAL: concurrency-safe by construction — a sibling instance may have a job IN FLIGHT, so we
+# touch ONLY objects that are reclaimable by definition: stopped containers (a running job's are
+# not stopped), dangling images (untagged + unreferenced — never a tagged image a job pulled), and
+# build cache idle past the cutoff (active builds keep theirs fresh). Deliberately NO `-a` (would
+# delete tagged images siblings rely on) and NO volume prune (a concurrent stack's data volume
+# could be destroyed). No-op where Docker is absent/unreachable.
+_prune_docker() {
+  [[ "${PRUNE_DOCKER_AFTER_JOB:-1}" == "1" ]] || return 0
+  command -v docker &>/dev/null || return 0
+  docker info &>/dev/null || return 0   # CLI present but daemon unreachable / no perms → skip quietly
+  docker container prune -f &>/dev/null || true
+  docker image prune -f     &>/dev/null || true
+  docker builder prune -f --filter "until=${PRUNE_BUILDER_UNTIL:-48h}" &>/dev/null || true
+  log "Post-job Docker prune: stopped containers + dangling images + build cache older than ${PRUNE_BUILDER_UNTIL:-48h}."
+}
+
 # ── SELFTEST exit point — after all function definitions, before main loop ─────
 if [[ "${_SELFTEST}" == "1" ]]; then
   type _acquire_reg_token &>/dev/null || exit 1
   type _shutdown         &>/dev/null || exit 1
   type _record_job_complete &>/dev/null || exit 1
+  type _prune_docker &>/dev/null || exit 1
   exit 0
 fi
 
@@ -267,6 +289,9 @@ except Exception:
   _run_exit=0
   nice -n "${NICE_PRIORITY}" "${RUNNER_DIR}/run.sh" || _run_exit=$?
   _CURRENT_REG_TOKEN=""
+
+  # Reclaim disk regardless of job outcome (a failed job can still leave dangling layers/cache).
+  _prune_docker
 
   if (( _run_exit != 0 )); then
     warn "run.sh exited non-zero (${_run_exit}) — looping to re-register."
