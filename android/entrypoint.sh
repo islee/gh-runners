@@ -141,6 +141,18 @@ cd "${RUNNER_HOME}" || {
     exit 1
 }
 
+# ── Clear stale local config (idempotency guard) ──────────────────────────────
+# WHY: docker-compose's `restart: always` restarts the SAME container (writable layer
+# intact), NOT a fresh one. The happy path only deletes .runner on a *clean* ephemeral
+# one-job completion; any unclean exit while idle (host reboot, `docker restart`,
+# OOM-killed job) leaves .runner behind. config.sh then aborts with "already configured"
+# and the container crash-loops forever. Wiping stale local config here makes startup
+# idempotent; the --replace below cleans up the matching server-side registration.
+if [[ -f "${RUNNER_HOME}/.runner" ]]; then
+    echo "[entrypoint] Stale config from a prior unclean exit — removing before re-register." >&2
+    rm -f .runner .credentials .credentials_rsaparams
+fi
+
 # ── Register the runner ───────────────────────────────────────────────────────
 # --ephemeral: runner exits after one job and deregisters itself automatically.
 # --unattended: no interactive prompts.
@@ -169,7 +181,8 @@ unset REG_TOKEN
 
 # ── Run one job ───────────────────────────────────────────────────────────────
 # run.sh blocks until the runner picks up and completes exactly one job (--ephemeral),
-# then exits. docker-compose.yml's `restart: always` brings up a fresh container to
-# re-register and wait for the next job.
+# then exits. docker-compose.yml's `restart: always` restarts THIS container (writable
+# layer intact) to re-register and wait for the next job — the idempotency guard above
+# clears any stale config so an unclean exit can't wedge the restart.
 echo "[entrypoint] Registration complete. Starting runner (will handle one job then exit) ..." >&2
 exec ./run.sh

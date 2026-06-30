@@ -2,8 +2,9 @@
 #
 # One service: runner-android.
 # Each container lives for exactly one GH Actions job (--ephemeral in entrypoint.sh),
-# then exits. `restart: always` brings a fresh container up immediately to re-register
-# and wait for the next job.
+# then exits. `restart: always` restarts the same container immediately to re-register
+# and wait for the next job; entrypoint.sh clears stale config so an unclean exit
+# (host reboot / docker restart while idle) can't wedge the restart loop.
 #
 # Prerequisites on the host:
 #   /dev/kvm must exist and the docker user must be in the `kvm` group.

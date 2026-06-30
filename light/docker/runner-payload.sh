@@ -85,6 +85,17 @@ resolve_credential
   exit 1; }
 cd "${RUNNER_HOME}"
 
+# ── Clear stale local config (idempotency guard) ──────────────────────────────
+# WHY: `restart: always` restarts the SAME container (writable layer intact), not a fresh
+# one. .runner is only deleted on a clean ephemeral one-job completion; an unclean exit
+# while idle (host reboot, docker restart, OOM kill) leaves it behind and config.sh then
+# aborts with "already configured", crash-looping forever. Wipe stale config so startup is
+# idempotent; --replace below reconciles the matching server-side registration.
+if [[ -f "${RUNNER_HOME}/.runner" ]]; then
+  echo "[payload] Stale config from a prior unclean exit — removing before re-register." >&2
+  rm -f .runner .credentials .credentials_rsaparams
+fi
+
 # ── Register (ephemeral) + run one job ────────────────────────────────────────
 echo "[payload] Registering '${RUNNER_NAME}' in org '${GH_ORG}' labels '${RUNNER_LABELS}' ..." >&2
 ./config.sh \

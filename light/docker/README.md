@@ -3,7 +3,8 @@
 Container-per-job version of the `light` runner, for hosts where you want **Docker isolation**
 instead of the host-level systemd setup in [`../`](../README.md). Built on the **official
 `ghcr.io/actions/actions-runner`** image plus a small registration entrypoint (curl + jq). Each
-container runs exactly one job (`--ephemeral`) then exits; `restart: always` spawns a fresh one.
+container runs exactly one job (`--ephemeral`) then exits; `restart: always` restarts it to
+re-register (the entrypoint clears stale config so an unclean exit can't wedge the loop).
 
 Choose this over the systemd variant when you want each job to run in a throwaway container; choose
 the [systemd variant](../README.md) when you want the simplest setup with no Docker on the host.
