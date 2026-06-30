@@ -1,10 +1,12 @@
 # Android E2E self-hosted runner — Docker Compose
 #
 # One service: runner-android.
-# Each container lives for exactly one GH Actions job (--ephemeral in entrypoint.sh),
+# Each container lives for exactly one GH Actions job (--ephemeral in runner-payload.sh),
 # then exits. `restart: always` restarts the same container immediately to re-register
-# and wait for the next job; entrypoint.sh clears stale config so an unclean exit
+# and wait for the next job; runner-payload.sh clears stale config so an unclean exit
 # (host reboot / docker restart while idle) can't wedge the restart loop.
+# Startup: bootstrap.sh (stable trust root) optionally self-updates runner-payload.sh from a
+# broker-verified ref, then runs it. Set AUTO_UPDATE=0 in .env to disable.
 #
 # Prerequisites on the host:
 #   /dev/kvm must exist and the docker user must be in the `kvm` group.
@@ -31,7 +33,7 @@ services:
     container_name: gh-runner-android
 
     environment:
-      # Runner name follows gh-runner-<type>-<id>-<n>, built in entrypoint.sh. Set <id>/<n> via
+      # Runner name follows gh-runner-<type>-<id>-<n>, built in bootstrap.sh. Set <id>/<n> via
       # OWNER / RUNNER_NUMBER (in .env), or override RUNNER_NAME outright. OWNER defaults to the
       # container hostname when empty.
       OWNER: "${OWNER:-}"

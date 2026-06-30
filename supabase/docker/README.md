@@ -36,6 +36,14 @@ Set one in `.env` (priority high → low): `RUNNER_TOKEN` (static, ~1h) → `BRO
 ([broker](https://github.com/islee/gh-runners/tree/main/broker), recommended) → `ACCESS_TOKEN` (fine-grained
 PAT, `organization_self_hosted_runners` only — never admin).
 
+## Fleet self-update
+The image's ENTRYPOINT is `bootstrap.sh` (stable trust root, never self-updated). On each container
+start, with the broker credential, it optionally fetches + sha256-verifies `runner-payload.sh` (the
+swappable register+run script) from a broker-anchored git ref before running it — falling back to the
+baked-in payload on any error. Broker manifest key: **`supabase-docker`** (`X-Fleet-Variant: docker`,
+distinct from the native `supabase` key). Set `AUTO_UPDATE=0` in `.env` to always run the baked-in
+payload. Same mechanism as [`light/docker`](../../light/docker/README.md); details in `bootstrap.sh`.
+
 ## Cleanup
 Ephemeral container, but the Docker state lives on the **host** — have your workflow stop the stack in
 an `if: always()` step (`supabase stop --no-backup || true`) so stacks don't accumulate across jobs.

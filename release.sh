@@ -88,17 +88,25 @@ done
 
 # ── Docker-variant manifests ────────────────────────────────────────────────────
 # Docker runners run a DIFFERENT payload than the native runner of the same type, so they carry their
-# own manifest under a "<type>-docker" broker key. Managed set = the single swappable payload
-# (runner-payload.sh); bootstrap.sh is the baked-in trust root and must NEVER be listed.
+# own manifest under a "<type>-<variant>" broker key (variant=docker). Managed set = the single
+# swappable payload (runner-payload.sh); bootstrap.sh is the baked-in trust root and must NEVER be
+# listed. Keys map to the repo dir holding the variant's files — note android lives at its own
+# top-level dir (it is docker-only, no native counterpart), unlike light/supabase under <type>/docker.
 readonly -a DOCKER_MANAGED_FILES=("runner-payload.sh")
+# Fixed key order → deterministic JSON output. Add a variant by extending both arrays.
+readonly -a DOCKER_VARIANT_KEYS=("light-docker" "supabase-docker" "android-docker")
+declare -A DOCKER_VARIANT_DIRS=(
+  ["light-docker"]="light/docker"
+  ["supabase-docker"]="supabase/docker"
+  ["android-docker"]="android"
+)
 declare -A DOCKER_MANIFEST_HASHES
 
-# shellcheck disable=SC2043  # single-element on purpose — a loop so adding e.g. `supabase` is one word
-for DTYPE in light; do
-  DDIR="${SCRIPT_DIR}/${DTYPE}/docker"
+for KEY in "${DOCKER_VARIANT_KEYS[@]}"; do
+  DDIR="${SCRIPT_DIR}/${DOCKER_VARIANT_DIRS[${KEY}]}"
   DMANIFEST="${DDIR}/.fleet-manifest"
   for F in "${DOCKER_MANAGED_FILES[@]}"; do
-    [[ -f "${DDIR}/${F}" ]] || { echo "[ERROR] ${DTYPE}/docker/${F} not found." >&2; exit 1; }
+    [[ -f "${DDIR}/${F}" ]] || { echo "[ERROR] ${DOCKER_VARIANT_DIRS[${KEY}]}/${F} not found." >&2; exit 1; }
   done
   {
     printf 'version=%s\n' "${VERSION}"
@@ -109,8 +117,8 @@ for DTYPE in light; do
       printf '%s  %s\n' "${HASH}" "${F}"
     done
   } > "${DMANIFEST}"
-  DOCKER_MANIFEST_HASHES["${DTYPE}-docker"]="$(_sha256_file "${DMANIFEST}")"
-  echo "[INFO]  Wrote ${DTYPE}/docker/.fleet-manifest (version=${VERSION})"
+  DOCKER_MANIFEST_HASHES["${KEY}"]="$(_sha256_file "${DMANIFEST}")"
+  echo "[INFO]  Wrote ${DOCKER_VARIANT_DIRS[${KEY}]}/.fleet-manifest (version=${VERSION})"
 done
 
 # ── Print operator output ──────────────────────────────────────────────────────
@@ -119,17 +127,22 @@ TAG="fleet-${VERSION}"
 echo ""
 echo "=== manifest sha256 map (set on broker as FLEET_MANIFEST_SHA256 per type) ==="
 printf '{\n'
-printf '  "light":        "%s",\n' "${MANIFEST_HASHES[light]}"
-printf '  "supabase":     "%s",\n' "${MANIFEST_HASHES[supabase]}"
-printf '  "ios":          "%s",\n' "${MANIFEST_HASHES[ios]}"
-printf '  "light-docker": "%s"\n'  "${DOCKER_MANIFEST_HASHES[light-docker]}"
+printf '  "light":           "%s",\n' "${MANIFEST_HASHES[light]}"
+printf '  "supabase":        "%s",\n' "${MANIFEST_HASHES[supabase]}"
+printf '  "ios":             "%s",\n' "${MANIFEST_HASHES[ios]}"
+printf '  "light-docker":    "%s",\n' "${DOCKER_MANIFEST_HASHES[light-docker]}"
+printf '  "supabase-docker": "%s",\n' "${DOCKER_MANIFEST_HASHES[supabase-docker]}"
+printf '  "android-docker":  "%s"\n'  "${DOCKER_MANIFEST_HASHES[android-docker]}"
 printf '}\n'
+echo ""
+echo "NOTE: 'playwright' runs light's code — set the broker 'playwright' key to the SAME hash as 'light'."
 echo ""
 echo "=== suggested git tag ==="
 echo "  ${TAG}"
 echo ""
 echo "=== next steps ==="
-echo "  1. git add light/.fleet-manifest supabase/.fleet-manifest ios/.fleet-manifest light/docker/.fleet-manifest"
+echo "  1. git add light/.fleet-manifest supabase/.fleet-manifest ios/.fleet-manifest \\"
+echo "         light/docker/.fleet-manifest supabase/docker/.fleet-manifest android/.fleet-manifest"
 echo "  2. git commit -m 'release: fleet-code ${VERSION}'"
 echo "  3. git push origin main"
 echo "  4. Wait ~60s for raw.githubusercontent.com CDN propagation."

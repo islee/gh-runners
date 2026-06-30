@@ -27,11 +27,22 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends docker-ce-cli && \
     rm -rf /var/lib/apt/lists/*
 
-COPY entrypoint.sh /opt/entrypoint.sh
-RUN chmod +x /opt/entrypoint.sh
+# ── Entrypoint (bootstrap trust root + swappable payload + fleet manifest) ────
+# bootstrap.sh is the STABLE ENTRYPOINT/trust root (never self-updated, not in the manifest);
+# runner-payload.sh is the swappable register+run script that bootstrap.sh may replace from a
+# broker-verified GitHub ref on each container start (X-Fleet-Variant: docker → key supabase-docker).
+# .fleet-manifest carries the version + per-file sha256 the broker anchors against.
+COPY bootstrap.sh /opt/bootstrap.sh
+COPY runner-payload.sh /opt/runner-payload.sh
+COPY .fleet-manifest /opt/.fleet-manifest
+RUN chmod +x /opt/bootstrap.sh /opt/runner-payload.sh
+
+# WHY ENV: makes UPDATE_REPO inspectable via `docker inspect` and overridable per-compose service
+# without a rebuild. bootstrap.sh reads this at startup.
+ENV UPDATE_REPO=islee/gh-runners
 
 # NOTE: the `runner` user must be able to talk to the mounted docker.sock. The socket's group GID on
 # the host varies; docker-compose.yml passes it via `group_add: ${DOCKER_GID}`. (Alternatively run
 # this image as a user matching the socket's group.)
 USER runner
-ENTRYPOINT ["/opt/entrypoint.sh"]
+ENTRYPOINT ["/opt/bootstrap.sh"]

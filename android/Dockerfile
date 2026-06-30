@@ -2,9 +2,9 @@
 #
 # WHY this base image: the official GitHub Actions runner image provides the runner binary
 # (config.sh / run.sh) without any third-party vendor code. Unlike myoung34/github-runner it
-# does NOT handle registration — our entrypoint.sh does that. The trade-off is a few more lines
-# in entrypoint.sh; the benefit is a first-party base with no supply-chain risk from an intermediary
-# image that injects GitHub credentials and runs PR code.
+# does NOT handle registration — our bootstrap.sh + runner-payload.sh do that. The trade-off is a
+# few more lines of our own script; the benefit is a first-party base with no supply-chain risk from
+# an intermediary image that injects GitHub credentials and runs PR code.
 #
 # Build args let you choose API level / target / arch at build time; the defaults cover the
 # common case: API 34, google_apis, x86_64 (KVM-accelerated on Linux x86_64 hosts).
@@ -26,7 +26,7 @@ ARG ANDROID_API=34
 ARG ANDROID_TARGET=google_apis
 ARG ANDROID_ARCH=x86_64
 
-# Expose as ENV so entrypoint.sh and hooks can read values baked at build time.
+# Expose as ENV so runner-payload.sh and hooks can read values baked at build time.
 ENV ANDROID_API=${ANDROID_API} \
     ANDROID_TARGET=${ANDROID_TARGET} \
     ANDROID_ARCH=${ANDROID_ARCH}
@@ -144,9 +144,19 @@ RUN chmod +x /opt/hooks/*.sh
 ENV ACTIONS_RUNNER_HOOK_JOB_STARTED=/opt/hooks/job-started.sh \
     ACTIONS_RUNNER_HOOK_JOB_COMPLETED=/opt/hooks/job-completed.sh
 
-# ── Entrypoint ────────────────────────────────────────────────────────────────
-COPY entrypoint.sh /opt/entrypoint.sh
-RUN chmod +x /opt/entrypoint.sh
+# ── Entrypoint (bootstrap trust root + swappable payload + fleet manifest) ────
+# bootstrap.sh is the STABLE ENTRYPOINT/trust root (never self-updated, not in the manifest);
+# runner-payload.sh is the swappable register+run script that bootstrap.sh may replace from a
+# broker-verified GitHub ref on each container start (X-Fleet-Variant: docker → key android-docker).
+# .fleet-manifest carries the version + per-file sha256 the broker anchors against.
+COPY bootstrap.sh /opt/bootstrap.sh
+COPY runner-payload.sh /opt/runner-payload.sh
+COPY .fleet-manifest /opt/.fleet-manifest
+RUN chmod +x /opt/bootstrap.sh /opt/runner-payload.sh
+
+# WHY ENV: makes UPDATE_REPO inspectable via `docker inspect` and overridable per-compose service
+# without a rebuild. bootstrap.sh reads this at startup.
+ENV UPDATE_REPO=islee/gh-runners
 
 # Return to the non-root runner user before handing control to the entrypoint.
 # CRITICAL: the official image's runner binary expects to run as `runner` (non-root). Staying
@@ -155,12 +165,8 @@ RUN chmod +x /opt/entrypoint.sh
 # NOTE: official image user and home directory —
 #   user: runner
 #   home / runner binary location: /home/runner  (config.sh and run.sh live here)
-# TODO: verify on first build that `ls /home/runner/config.sh` exists; if the layout differs,
-#   update RUNNER_HOME in entrypoint.sh and this comment.
 USER runner
 
-ENTRYPOINT ["/opt/entrypoint.sh"]
+ENTRYPOINT ["/opt/bootstrap.sh"]
 # NOTE: the official image's default CMD is not a runner-listener command like myoung34's.
-# We do NOT rely on CMD here — entrypoint.sh calls run.sh directly after registering.
-# This is intentional: unlike myoung34, the official image is not designed to receive CMD
-# args as the runner listener command. entrypoint.sh exec's run.sh with no args.
+# We do NOT rely on CMD here — runner-payload.sh calls run.sh directly after registering.

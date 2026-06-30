@@ -7,7 +7,10 @@ and runs Android Maestro E2E tests via a KVM-accelerated emulator.
 unusably slow for CI). For iOS or Android-on-macOS, see a separate macOS runner setup.
 
 **Base image:** `ghcr.io/actions/actions-runner` — the official GitHub Actions runner image.
-Registration is handled by `entrypoint.sh` (no third-party runner base).
+Registration is handled by `bootstrap.sh` + `runner-payload.sh` (no third-party runner base):
+`bootstrap.sh` is the stable ENTRYPOINT/trust root that resolves a token and optionally
+self-updates `runner-payload.sh` from a broker-verified GitHub ref; `runner-payload.sh` does the
+ephemeral register-and-run. See [Fleet self-update](#fleet-self-update) below.
 
 ---
 
@@ -117,18 +120,35 @@ GitHub outbound only.
 
 ```
 docker compose up → container starts
-  └─ entrypoint.sh
-       ├─ 1. Resolve credential (RUNNER_TOKEN → BROKER_URL → ACCESS_TOKEN)
-       ├─ 2. Register via config.sh --ephemeral --unattended --replace
-       └─ 3. exec run.sh  (blocks, picks up exactly one job)
-               ├─ before job: ACTIONS_RUNNER_HOOK_JOB_STARTED
-               │     └─ hooks/job-started.sh  — boots KVM emulator, waits for boot_completed
-               ├─ job runs (adb / Maestro / etc.)
-               └─ after job:  ACTIONS_RUNNER_HOOK_JOB_COMPLETED
-                     └─ hooks/job-completed.sh  — kills emulator, cleans up adb
-                          └─ run.sh exits → container exits
-                               └─ restart: always → fresh container → repeat
+  └─ bootstrap.sh  (stable trust root — never self-updated)
+       ├─ 1. Resolve credential (RUNNER_TOKEN → BROKER_URL → ACCESS_TOKEN);
+       │     broker model also reads the optional fleet_update payload
+       ├─ 2. If AUTO_UPDATE=1 + fleet_update present: fetch + sha256-verify runner-payload.sh
+       │     from the broker-anchored ref (fail-safe → baked-in payload on any error)
+       └─ 3. exec runner-payload.sh  (staged-updated or baked-in)
+               ├─ a. Clear stale .runner (idempotency guard — survives unclean exits)
+               ├─ b. Register via config.sh --ephemeral --unattended --replace
+               └─ c. exec run.sh  (blocks, picks up exactly one job)
+                       ├─ before job: ACTIONS_RUNNER_HOOK_JOB_STARTED
+                       │     └─ hooks/job-started.sh  — boots KVM emulator, waits for boot_completed
+                       ├─ job runs (adb / Maestro / etc.)
+                       └─ after job:  ACTIONS_RUNNER_HOOK_JOB_COMPLETED
+                             └─ hooks/job-completed.sh  — kills emulator, cleans up adb
+                                  └─ run.sh exits → container exits
+                                       └─ restart: always → restart → repeat (re-checks update)
 ```
+
+<a name="fleet-self-update"></a>
+### Fleet self-update
+
+`bootstrap.sh` is baked into the image and is the stable trust root — it is **never** self-updated
+(not listed in `.fleet-manifest`); change it only by rebuilding the image. On each container start it
+asks the broker for a token; if the broker returns a `fleet_update` (a desired git ref +
+`manifest_sha256`), bootstrap fetches `android/.fleet-manifest` at that ref, verifies its sha256
+against the **broker-supplied** value (out-of-repo trust anchor), then downloads + sha256-verifies +
+`bash -n`-checks `runner-payload.sh` before exec'ing it. Any failure falls back to the baked-in
+payload — a job is never blocked by an update. Broker manifest key: **`android-docker`**
+(`X-Fleet-Variant: docker`). Set `AUTO_UPDATE=0` to always run the baked-in payload.
 
 Each container handles **one job** then is replaced by a clean one. No state (secrets, artifacts,
 file system changes) bleeds between jobs.
@@ -228,13 +248,13 @@ the SDK download step.
 **Official image layout (first-build verification)**
 
 The Dockerfile assumes the runner binary lives at `/home/runner/{config.sh,run.sh}` and that the
-user is `runner`. If entrypoint.sh logs `config.sh not found`, run:
+user is `runner`. If runner-payload.sh logs `config.sh not found`, run:
 
 ```bash
 docker run --rm ghcr.io/actions/actions-runner ls -la /home/runner
 ```
 
-Update `RUNNER_HOME` in `entrypoint.sh` if the layout differs.
+Update `RUNNER_HOME` in `bootstrap.sh` and `runner-payload.sh` if the layout differs.
 
 ---
 
@@ -243,7 +263,7 @@ Update `RUNNER_HOME` in `entrypoint.sh` if the layout differs.
 Runners execute arbitrary code from GitHub Actions workflows on this machine. Key mitigations:
 
 - **Ephemeral:** every job runs in a fresh container; no prior job's artifacts, secrets, or
-  file system state persist. This is enforced in `entrypoint.sh` (`--ephemeral` in `config.sh`)
+  file system state persist. This is enforced in `runner-payload.sh` (`--ephemeral` in `config.sh`)
   and cannot be overridden by `.env`.
 - **Untrusted fork gate:** Android E2E jobs should be triggered on `main` HEAD (nightly) or on
   an explicit maintainer-applied label — never automatically on fork PRs. Untrusted code from
