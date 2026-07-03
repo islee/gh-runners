@@ -26,6 +26,13 @@ CONFIG_ENV="${SCRIPT_DIR}/config.env"
 source "${CONFIG_ENV}"
 
 RUNNER_DIR="${SCRIPT_DIR}"
+
+# Keep globally-installed npm CLIs resolvable. The unit points npm at a per-instance prefix
+# (npm_config_prefix) so co-hosted jobs don't race on `npm i -g` into the shared toolcache; its bin
+# dir must be on PATH for the job to find the installed tool. Prepending here (vs hardcoding PATH in
+# the unit) preserves whatever PATH systemd provides and is inherited by the exec'd runner + its jobs.
+[[ -n "${npm_config_prefix:-}" ]] && export PATH="${npm_config_prefix}/bin:${PATH}"
+
 readonly STATE_FILE="${RUNNER_DIR}/.fleet-state"
 readonly LAST_GOOD_DIR="${RUNNER_DIR}/last_good"
 # CRITICAL: this list must match self-update.sh UPDATE_ALLOWLIST exactly.

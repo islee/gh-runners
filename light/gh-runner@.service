@@ -36,6 +36,15 @@ Environment=AGENT_TOOLSDIRECTORY=__TOOLCACHE_DIR__
 # fleet-wide. Giving each instance %i its own HOME isolates those caches. install.sh creates the dir.
 # (The shared toolcache + Playwright browser cache stay shared on purpose — set via their own env.)
 Environment=HOME=__RUNNER_BASE__/%i/home
+# CRITICAL — per-instance npm global prefix. `npm install -g` defaults its prefix to the node install
+# dir, which for setup-node runners is the SHARED toolcache (/opt/hostedtoolcache/node/<ver>/<arch>).
+# Two co-hosted jobs installing the same global package at once (e.g. parallel prod+staging deploys
+# both running `npm i -g vercel@latest`) then race on npm's atomic package rename and one fails with
+# ENOTEMPTY/EEXIST. Redirecting the prefix under the per-instance HOME isolates global installs; the
+# bin dir is prepended to PATH in runner-bootstrap.sh so the installed CLI stays resolvable. Same race
+# class as the per-instance HOME above — the global prefix just escapes HOME by default. install.sh
+# creates the dir. (npm reads the lowercase `npm_config_prefix` env var; it overrides any .npmrc.)
+Environment=npm_config_prefix=__RUNNER_BASE__/%i/home/.npm-global
 # Playwright capability (only when installed with --with-playwright): points every job at a shared,
 # persistent browser cache so `playwright install` is a cache hit and needs no root. Blank otherwise.
 __PLAYWRIGHT_ENV__

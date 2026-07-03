@@ -228,7 +228,10 @@ for i in $(seq 1 "${COUNT}"); do
   mkdir -p "${INST_DIR}"
   # Per-instance HOME (see gh-runner@.service): isolates per-user caches so concurrent runners on the
   # same user don't race/corrupt pnpm's setup cache, the registry-auth .npmrc, or deno/pip/npm caches.
-  mkdir -p "${INST_DIR}/home"
+  # .npm-global is the per-instance npm_config_prefix (unit env) — isolates `npm i -g` off the shared
+  # toolcache so co-hosted jobs can't collide on a global-package rename. npm creates it on first
+  # install; pre-create so ownership is correct from the start.
+  mkdir -p "${INST_DIR}/home/.npm-global"
   tar -xzf "${TMP_TGZ}" -C "${INST_DIR}"
 
   # WHY: config.sh refuses to register ("already configured") if stale local registration files

@@ -127,7 +127,11 @@ Supply exactly one (priority high → low):
 Co-hosted instances run as the **same user**, so each gets its **own `HOME`** at `<runner-base>/<i>/home`
 (baked into the unit, created by `install.sh`). Without this, concurrent jobs race on shared per-user
 caches — `pnpm/action-setup`'s install dir, `setup-node`'s registry-auth `.npmrc`, and the
-deno/pip/npm caches — which has corrupted pnpm fleet-wide. The shared tool cache
+deno/pip/npm caches — which has corrupted pnpm fleet-wide. Each instance also gets its **own npm
+global prefix** at `<runner-base>/<i>/home/.npm-global` (`npm_config_prefix` in the unit, on `PATH`
+via `runner-bootstrap.sh`): `npm i -g` otherwise defaults into the *shared* tool cache node dir, so
+two co-hosted jobs installing the same global package at once (e.g. parallel prod+staging `npm i -g
+vercel@latest`) collide on npm's atomic package rename (`ENOTEMPTY`). The shared tool cache
 (`AGENT_TOOLSDIRECTORY`) and Playwright browser cache stay shared on purpose (concurrency-tolerant /
 read-mostly). Trade-off: per-instance caches use more disk and aren't shared across instances.
 
