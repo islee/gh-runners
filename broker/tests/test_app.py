@@ -682,13 +682,14 @@ def test_capability_alerts_empty_when_no_expected_caps(monkeypatch):
 
 
 def test_fleet_health_feature_off_returns_ok_true(monkeypatch):
-    """When EXPECTED_CAPABILITIES is empty, /fleet-health always ok=True and alerts=[]."""
+    """When EXPECTED_CAPABILITIES is empty, /fleet-health always ok=True and alerts=[] —
+    and it must NOT hit GitHub at all (uptime monitors probe this endpoint frequently)."""
     monkeypatch.setattr(appmod, "EXPECTED_CAPABILITIES", [])
 
-    async def fake_list_runners(client):
-        return []
+    async def fail_if_called():
+        raise AssertionError("dormant /fleet-health must not query the GitHub fleet")
 
-    monkeypatch.setattr(appmod, "_list_runners", fake_list_runners)
+    monkeypatch.setattr(appmod, "_fleet_or_error", fail_if_called)
     r = client.get("/fleet-health", headers={"Authorization": "Bearer test-broker-secret"})
     assert r.status_code == 200
     assert r.json() == {"ok": True, "alerts": []}
@@ -929,6 +930,30 @@ def test_jitconfig_allowed_labels_on_rejects_out_of_set(monkeypatch):
     r = client.post(
         "/jitconfig",
         json={"name": "gh-runner-light-host-1", "labels": ["light", "unknown-label"]},
+        headers={"Authorization": "Bearer test-broker-secret"},
+    )
+    assert r.status_code == 400
+
+
+def test_parse_allowed_labels_strips_whitespace():
+    """'light, supabase' (natural human input, space after comma) must parse to clean tokens."""
+    assert appmod._parse_allowed_labels("light, supabase , PLAYWRIGHT,,") == {
+        "light",
+        "supabase",
+        "playwright",
+    }
+    assert appmod._parse_allowed_labels("") == set()
+    assert appmod._parse_allowed_labels("   ") == set()
+
+
+def test_jitconfig_name_with_trailing_newline_is_400(monkeypatch):
+    """A $-anchored regex matches before a trailing \\n (log-record splitting vector); the
+    \\Z anchor must reject a name ending in a newline."""
+    monkeypatch.setattr(appmod, "_generate_jitconfig", _fake_generate_jitconfig)
+    monkeypatch.setattr(appmod, "ALLOWED_LABELS", set())
+    r = client.post(
+        "/jitconfig",
+        json={"name": "gh-runner-light-host-1\n", "labels": ["light"]},
         headers={"Authorization": "Bearer test-broker-secret"},
     )
     assert r.status_code == 400

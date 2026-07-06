@@ -132,22 +132,30 @@ except ValueError:
         _raw_group_id,
     )
 
+
 # WHY ALLOWED_LABELS: on the registration-token path (/token) labels are self-assigned by the
 # runner at config.sh time and the broker has no visibility into them. The JIT path closes this
 # gap: the broker validates every requested label against this set before minting the config,
 # giving operators the first real label-enforcement win. Empty set (default) disables the
 # restriction — any label is accepted. Non-empty set rejects any label not in the allowlist.
-_raw_allowed_labels = os.environ.get("ALLOWED_LABELS", "")
-ALLOWED_LABELS: set[str] = (
-    {lbl.lower() for lbl in _raw_allowed_labels.split(",") if lbl.strip()}
-    if _raw_allowed_labels.strip()
-    else set()
-)
+def _parse_allowed_labels(raw: str) -> set[str]:
+    """Parse the ALLOWED_LABELS comma list into a lowercased set.
+
+    NOTE: tokens are stripped — 'light, supabase' (natural human input with a space after the
+    comma) must yield {'light', 'supabase'}, not {' supabase', ...}, or valid labels get 400s.
+    Empty/blank input yields the empty set (= restriction disabled).
+    """
+    return {lbl.strip().lower() for lbl in raw.split(",") if lbl.strip()}
+
+
+ALLOWED_LABELS: set[str] = _parse_allowed_labels(os.environ.get("ALLOWED_LABELS", ""))
 
 # Runner name must follow the fleet convention: gh-runner-<type>-<id>-<n>
 # (type = [a-z0-9], remainder = [a-z0-9-]). Enforced on the JIT path where the broker
 # controls the name that gets embedded into the JIT config.
-_JIT_NAME_RE = re.compile(r"^gh-runner-[a-z0-9][a-z0-9-]*$")
+# NOTE: \Z, not $ — $ also matches before a trailing newline, which would let a name ending
+# in "\n" through validation and corrupt single-line log records downstream.
+_JIT_NAME_RE = re.compile(r"^gh-runner-[a-z0-9][a-z0-9-]*\Z")
 
 # Background task set: keeps asyncio.Task references alive until they complete so fire-and-forget
 # persistence calls are not garbage-collected mid-flight.
@@ -1180,6 +1188,11 @@ async def fleet_health(
     """
     _rate_limit(request)
     _check_auth(authorization)
+    # WHY early return: with the feature dormant the alert list is [] by definition, so the
+    # GitHub fleet call would be pure waste — and this endpoint is meant for frequent uptime
+    # probes, which would otherwise burn GitHub API quota for nothing.
+    if not EXPECTED_CAPABILITIES:
+        return {"ok": True, "alerts": []}
     fleet = await _fleet_or_error()
     alerts = _capability_alerts(fleet)
     return {"ok": len(alerts) == 0, "alerts": alerts}
