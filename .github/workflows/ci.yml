@@ -1,7 +1,8 @@
 name: ci
 
 # Single source of truth: run the same pre-commit hooks CI and locally.
-# Hooks: shellcheck + hadolint + ruff (lint), broker pytest (test), detect-private-key +
+# Hooks: shellcheck + hadolint + ruff (lint), broker pytest (test), runner-loop SELFTEST
+# (light/supabase/ios) + bash -n on self-update.sh (runner-selftest), detect-private-key +
 # gitleaks (secret scan), plus YAML/whitespace hygiene. See .pre-commit-config.yaml.
 
 on:

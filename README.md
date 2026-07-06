@@ -93,6 +93,7 @@ gh-runners/
 ├── android/      # Docker (official ghcr.io/actions/actions-runner) + KVM emulator
 ├── ios/          # macOS, launchd
 ├── windows/      # Windows, native actions/runner + Task Scheduler
+├── tests/        # Gate helpers: runner-loop.sh SELFTEST + self-update.sh syntax checks
 ├── render.yaml   # Render Blueprint for broker/ (rootDir: broker)
 ├── .env.{render,pve,mac}.example   # per-target env templates (real ones gitignored)
 ├── README.md  LICENSE  .gitignore  .hadolint.yaml

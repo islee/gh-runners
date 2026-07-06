@@ -2,6 +2,15 @@
 # Run on demand:  pre-commit run --all-files
 # Broker tests need the dev deps once:  pip install -r broker/requirements-dev.txt
 # CI runs the same hooks (.github/workflows/ci.yml), so local == CI.
+#
+# Hooks summary:
+#   shellcheck        — shell script lint (warning+)
+#   hadolint          — Dockerfile lint
+#   ruff / ruff-format — broker Python lint + format
+#   broker-pytest     — broker unit tests
+#   runner-selftest   — runner-loop.sh SELFTEST modes (light/supabase/ios) + bash -n on self-update.sh
+#   trailing-whitespace / end-of-file-fixer / check-yaml / check-merge-conflict — hygiene
+#   detect-private-key / gitleaks — secret scan
 
 repos:
   # ── Hygiene + secret safety ──────────────────────────────────────────────
@@ -49,4 +58,10 @@ repos:
         entry: bash -c 'cd broker && pytest -q'
         language: system             # needs: pip install -r broker/requirements-dev.txt
         files: ^broker/
+        pass_filenames: false
+      - id: runner-selftest
+        name: runner-loop SELFTEST (light/supabase/ios)
+        entry: bash tests/run-selftests.sh
+        language: system
+        files: ^(light|supabase|ios)/(runner-loop|self-update)\.sh$
         pass_filenames: false
