@@ -47,7 +47,8 @@ the repo-root `.github/workflows/ci.yml`.)
 |--------|------|------|---------|
 | `POST` | `/token` | `Bearer $BROKER_SECRET` | `{"token","expires_at","url"[,"fleet_update"]}` registration token |
 | `POST` | `/remove-token` | `Bearer $BROKER_SECRET` | `{"token","expires_at"}` |
-| `GET` | `/stats` | `Bearer $BROKER_SECRET` | recent token activity by type / host / runner |
+| `GET` | `/stats` | `Bearer $BROKER_SECRET` | recent token activity by type / host / runner + capability alerts |
+| `GET` | `/fleet-health` | `Bearer $BROKER_SECRET` | `{"ok":bool,"alerts":[...]}` — lightweight check for uptime monitors |
 | `GET` | `/health` | none | `{"ok":true}` |
 
 Optional `X-Runner-Name` header is logged for attribution **and feeds `/stats`** (see below).
@@ -86,6 +87,11 @@ curl -fsS -H "Authorization: Bearer $BROKER_SECRET" https://<service>/stats | jq
     "total": 4, "online": 3, "busy": 1,
     "by_type": { "light": { "total": 2, "online": 2, "busy": 0 }, … },
     "by_host": { "my-host": { "total": 4, "online": 3, "busy": 1 } },
+    "by_label": {
+      "self-hosted": { "total": 4, "online": 3, "busy": 1 },
+      "light": { "total": 2, "online": 2, "busy": 0 },
+      "supabase": { "total": 1, "online": 1, "busy": 0 }
+    },
     "runners": [
       { "name": "gh-runner-light-my-host-1", "type": "light", "host": "my-host",
         "status": "online", "busy": false, "labels": ["self-hosted","light"] }, … ]
@@ -97,7 +103,8 @@ curl -fsS -H "Authorization: Bearer $BROKER_SECRET" https://<service>/stats | jq
     "totals": { "token": 40, "remove-token": 2 },
     "by_type": { "light": { "token": 28, "remove-token": 0, "last_seen": "…" }, … },
     "by_host": { "my-host": { "token": 40, "remove-token": 2, "last_seen": "…" } }
-  }
+  },
+  "alerts": []   // populated when EXPECTED_CAPABILITIES is set and a label has zero online runners
 }
 ```
 
@@ -221,6 +228,46 @@ See [`env.example`](env.example) for the full reference with comments. In brief:
 | `FLEET_DESIRED_REF` | Git tag runners should track (e.g. `v2026.06.26.1`). Feature dormant when unset. |
 | `FLEET_MANIFEST_SHA256` | JSON object mapping key → sha256. Keys are bare type (`"light"`) for native runners or `"<type>-<variant>"` (`"light-docker"`) for variant runners. Computed by `release.sh`. |
 | `FLEET_MIN_VERSION` | Advisory floor string passed through to runners. Never forces an update. |
+
+## Capability alerting
+
+Set `EXPECTED_CAPABILITIES` to a comma-separated list of runner labels that should always have at
+least one online runner. When any listed label has zero online runners, that label appears in the
+`alerts` array on `/stats` and in the `/fleet-health` response.
+
+| Var | Default | Purpose |
+|-----|---------|---------|
+| `EXPECTED_CAPABILITIES` | `` (empty — feature off) | Labels expected to always have ≥1 online runner (e.g. `light,supabase,playwright`). Case-insensitive. |
+
+**Unset or empty ⇒ feature dormant.** `/stats` carries `"alerts": []` and `/fleet-health` returns
+`{"ok": true, "alerts": []}` with no behavior change to existing callers.
+
+### `/fleet-health` endpoint
+
+`GET /fleet-health` (Bearer-auth'd, rate-limited) is designed for external uptime monitors:
+
+```bash
+curl -fsS -H "Authorization: Bearer $BROKER_SECRET" https://<service>/fleet-health
+# ok — all capabilities healthy
+{"ok": true, "alerts": []}
+
+# dead pool — supabase label has no online runners
+{"ok": false, "alerts": [{"label": "supabase", "online": 0, "total": 1, "reason": "no online runners for capability"}]}
+
+# broker→GitHub outage (when EXPECTED_CAPABILITIES is set)
+{"ok": false, "alerts": [{"label": null, "reason": "fleet query failed", "detail": "..."}]}
+```
+
+Wire `ok=false` to a page/alert in your uptime tool. `"ok": true` when the feature is off (so
+enabling monitoring does not require a simultaneous deploy of runner configs).
+
+**by_label in /stats** — `fleet.by_label` gives per-label `total`/`online`/`busy` counts useful for
+capacity dashboards. Keys are lowercased regardless of how GitHub stores the label.
+
+> **Future: queue-time telemetry.** Per-label online counts show whether a capability pool is dead,
+> but NOT how long jobs wait before a runner picks them up. Capturing queue latency requires inbound
+> `workflow_job` webhook events plus org-level webhook configuration, and is deliberately deferred.
+> Online count is a coarse but zero-config proxy for pool health.
 
 ## Credentials & security
 

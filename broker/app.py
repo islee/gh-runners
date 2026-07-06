@@ -94,6 +94,18 @@ if _fleet_manifest_raw:
             "FLEET_MANIFEST_SHA256 is not valid JSON — fleet_update dormant for all runner types"
         )
 
+# Capability alerting. OPTIONAL — when unset (or empty after stripping) the feature is fully
+# dormant: _capability_alerts() returns [], /stats carries alerts=[], /fleet-health returns ok=True
+# with zero behavior change to any existing caller. When set, a comma-separated list of capability
+# labels expected to always have ≥1 online runner; dead labels appear in alerts arrays and cause
+# /fleet-health to return ok=False.
+#
+# NOTE: lowercased at import so case folds cleanly — GitHub labels may be mixed-case, but the
+# alert comparison always uses the lowercased form matched against by_label (also lowercased).
+EXPECTED_CAPABILITIES = [
+    c.strip().lower() for c in os.environ.get("EXPECTED_CAPABILITIES", "").split(",") if c.strip()
+]
+
 # Fleet variant validation. Docker-variant runners run different payloads than native runners of
 # the same type, so they resolve a different manifest hash under a `<type>-<variant>` key.
 # WHY restrict charset: an unchecked header value could forge arbitrary map keys; [a-z0-9-] keeps
@@ -821,12 +833,15 @@ async def _list_runners(client: httpx.AsyncClient) -> list[dict]:
 
 
 def _aggregate_fleet(runners: list[dict]) -> dict:
-    """Group raw GitHub runner dicts into a fleet summary by type and host.
+    """Group raw GitHub runner dicts into a fleet summary by type, host, and label.
 
-    Returns total/online/busy counts at fleet, type, and host level plus a sorted runner list.
+    Returns total/online/busy counts at fleet, type, host, and label level plus a sorted runner
+    list. by_label keys are lowercased so case folds — GitHub labels may be mixed-case, but
+    _capability_alerts always compares lowercased EXPECTED_CAPABILITIES against these keys.
     """
     by_type: dict[str, dict] = {}
     by_host: dict[str, dict] = {}
+    by_label: dict[str, dict] = {}
     runner_list: list[dict] = []
 
     def _group(table: dict, key: str) -> dict:
@@ -841,6 +856,14 @@ def _aggregate_fleet(runners: list[dict]) -> dict:
 
         for table, key in ((by_type, rtype), (by_host, host)):
             g = _group(table, key)
+            g["total"] += 1
+            if online:
+                g["online"] += 1
+            if busy:
+                g["busy"] += 1
+
+        for label in labels:
+            g = _group(by_label, label.lower())
             g["total"] += 1
             if online:
                 g["online"] += 1
@@ -870,8 +893,53 @@ def _aggregate_fleet(runners: list[dict]) -> dict:
         "busy": busy_total,
         "by_type": by_type,
         "by_host": by_host,
+        "by_label": by_label,
         "runners": runner_list,
     }
+
+
+def _capability_alerts(fleet: dict) -> list[dict]:
+    """Compute alerts for capabilities that have no online runners.
+
+    Returns [] immediately when EXPECTED_CAPABILITIES is empty (feature dormant — zero behavior
+    change). Returns a single fleet-error alert when fleet has an "error" key so uptime monitors
+    catch broker↔GitHub breakage when the feature is on. Otherwise checks each capability label
+    against fleet["by_label"] online counts.
+    """
+    if not EXPECTED_CAPABILITIES:
+        return []
+    if "error" in fleet:
+        return [{"label": None, "reason": "fleet query failed", "detail": fleet["error"]}]
+    alerts: list[dict] = []
+    for cap in EXPECTED_CAPABILITIES:
+        entry = fleet.get("by_label", {}).get(cap, {})
+        online = entry.get("online", 0)
+        if online == 0:
+            alerts.append(
+                {
+                    "label": cap,
+                    "online": 0,
+                    "total": entry.get("total", 0),
+                    "reason": "no online runners for capability",
+                }
+            )
+    return alerts
+
+
+async def _fleet_or_error() -> dict:
+    """Fetch and aggregate the current org fleet, or return {"error": "..."} on failure.
+
+    Shared by /stats and /fleet-health so both see a consistent fleet snapshot from a single
+    GitHub call per request. Errors are surfaced in-band (never raised) so callers can include
+    partial results without blocking.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            return _aggregate_fleet(await _list_runners(client))
+    except httpx.HTTPError as e:
+        return {"error": f"github fleet query failed: {e}"}
+    except Exception as e:
+        return {"error": f"github fleet query failed: {e}"}
 
 
 @app.get("/health")
@@ -940,24 +1008,40 @@ async def stats(
     """Fleet view + activity counters. Auth-gated (exposes fleet topology) and rate-limited.
 
     Returns:
-      fleet   — live runner state queried from GitHub (durable by construction; fails gracefully).
-      activity — token/remove-token counters (durable when Upstash is configured, else in-memory).
+      generated_at — ISO timestamp of this response.
+      fleet        — live runner state queried from GitHub (durable by construction; fails gracefully).
+                     Includes by_label with per-label online/total/busy counts (lowercased keys).
+      activity     — token/remove-token counters (durable when Upstash is configured, else in-memory).
+      alerts       — capability alerts when EXPECTED_CAPABILITIES is set; [] when feature is dormant.
     """
     _rate_limit(request)
     _check_auth(authorization)
 
-    # Fleet query: one async client, errors surface as {"error": ...} without blocking activity.
-    fleet: dict
-    try:
-        async with httpx.AsyncClient(timeout=15) as client:
-            fleet = _aggregate_fleet(await _list_runners(client))
-    except httpx.HTTPError as e:
-        fleet = {"error": f"github fleet query failed: {e}"}
-    except Exception as e:
-        fleet = {"error": f"github fleet query failed: {e}"}
+    fleet = await _fleet_or_error()
 
     return {
         "generated_at": _iso(time.time()),
         "fleet": fleet,
         "activity": await _stats.snapshot(),
+        "alerts": _capability_alerts(fleet),
     }
+
+
+@app.get("/fleet-health")
+async def fleet_health(
+    request: Request,
+    authorization: str | None = Header(default=None),
+) -> dict:
+    """Lightweight capability-health check for uptime monitors. Auth-gated (Bearer), rate-limited.
+
+    Returns {"ok": bool, "alerts": list}. ok=True when all expected capabilities have ≥1 online
+    runner, or when EXPECTED_CAPABILITIES is unset (feature dormant — ok is always True). Cheap:
+    one GitHub fleet call, returns only the alert summary rather than the full fleet topology.
+
+    NOTE: not a public probe — Bearer auth required to prevent topology disclosure via alert shape.
+    """
+    _rate_limit(request)
+    _check_auth(authorization)
+    fleet = await _fleet_or_error()
+    alerts = _capability_alerts(fleet)
+    return {"ok": len(alerts) == 0, "alerts": alerts}

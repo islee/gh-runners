@@ -12,6 +12,7 @@ driven via asyncio.run() in sync tests (no pytest-asyncio dependency).
 import asyncio
 
 import app as appmod
+import httpx
 from app import (
     RateLimiter,
     RedisStatsStore,
@@ -408,6 +409,28 @@ def test_stats_endpoint_returns_snapshot_with_auth():
     assert "generated_at" in body
     assert "fleet" in body
     assert "activity" in body
+    assert "alerts" in body  # additive capability-alerting key (feature-off default: [])
+
+
+def test_fleet_health_feature_on_github_error_is_not_ok(monkeypatch):
+    """Feature on + GitHub fleet fetch fails → ok=False with a single fleet-error alert.
+
+    This is the load-bearing uptime-monitor path: a broker↔GitHub outage must surface as not-ok
+    rather than silently reporting healthy.
+    """
+    monkeypatch.setattr(appmod, "EXPECTED_CAPABILITIES", ["light"])
+
+    async def failing_list_runners(client):
+        raise httpx.HTTPError("simulated GitHub outage")
+
+    monkeypatch.setattr(appmod, "_list_runners", failing_list_runners)
+    r = client.get("/fleet-health", headers={"Authorization": "Bearer test-broker-secret"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is False
+    assert len(body["alerts"]) == 1
+    assert body["alerts"][0]["label"] is None
+    assert "fleet query failed" in body["alerts"][0]["reason"]
 
 
 # --- fleet self-update channel -------------------------------------------------------------------
@@ -646,6 +669,159 @@ def test_fleet_update_no_variant_uses_type_key(monkeypatch):
     body = r.json()
     assert "fleet_update" in body, f"expected fleet_update for native runner in {body}"
     assert body["fleet_update"]["manifest_sha256"] == "nativehash000000"
+
+
+# --- EXPECTED_CAPABILITIES / _capability_alerts / /fleet-health ---------------------------------
+
+
+def test_capability_alerts_empty_when_no_expected_caps(monkeypatch):
+    """_capability_alerts returns [] immediately when EXPECTED_CAPABILITIES is empty."""
+    monkeypatch.setattr(appmod, "EXPECTED_CAPABILITIES", [])
+    alerts = appmod._capability_alerts({"by_label": {}, "total": 0, "online": 0, "busy": 0})
+    assert alerts == []
+
+
+def test_fleet_health_feature_off_returns_ok_true(monkeypatch):
+    """When EXPECTED_CAPABILITIES is empty, /fleet-health always ok=True and alerts=[]."""
+    monkeypatch.setattr(appmod, "EXPECTED_CAPABILITIES", [])
+
+    async def fake_list_runners(client):
+        return []
+
+    monkeypatch.setattr(appmod, "_list_runners", fake_list_runners)
+    r = client.get("/fleet-health", headers={"Authorization": "Bearer test-broker-secret"})
+    assert r.status_code == 200
+    assert r.json() == {"ok": True, "alerts": []}
+
+
+def test_fleet_health_all_healthy(monkeypatch):
+    """All expected capabilities have ≥1 online runner → ok=True, no alerts."""
+    monkeypatch.setattr(appmod, "EXPECTED_CAPABILITIES", ["light", "supabase"])
+
+    async def fake_list_runners(client):
+        return [
+            {
+                "name": "gh-runner-light-host-1",
+                "status": "online",
+                "busy": False,
+                "labels": [{"name": "self-hosted"}, {"name": "light"}],
+            },
+            {
+                "name": "gh-runner-supabase-host-1",
+                "status": "online",
+                "busy": False,
+                "labels": [{"name": "self-hosted"}, {"name": "supabase"}],
+            },
+        ]
+
+    monkeypatch.setattr(appmod, "_list_runners", fake_list_runners)
+    r = client.get("/fleet-health", headers={"Authorization": "Bearer test-broker-secret"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["alerts"] == []
+
+
+def test_fleet_health_dead_capability(monkeypatch):
+    """One capability with all runners offline → one alert for that label, ok=False."""
+    monkeypatch.setattr(appmod, "EXPECTED_CAPABILITIES", ["light", "supabase"])
+
+    async def fake_list_runners(client):
+        return [
+            {
+                "name": "gh-runner-light-host-1",
+                "status": "online",
+                "busy": False,
+                "labels": [{"name": "self-hosted"}, {"name": "light"}],
+            },
+            {
+                "name": "gh-runner-supabase-host-1",
+                "status": "offline",
+                "busy": False,
+                "labels": [{"name": "self-hosted"}, {"name": "supabase"}],
+            },
+        ]
+
+    monkeypatch.setattr(appmod, "_list_runners", fake_list_runners)
+    r = client.get("/fleet-health", headers={"Authorization": "Bearer test-broker-secret"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is False
+    assert len(body["alerts"]) == 1
+    alert = body["alerts"][0]
+    assert alert["label"] == "supabase"
+    assert alert["online"] == 0
+    assert alert["total"] == 1
+    assert "no online runners" in alert["reason"]
+
+
+def test_fleet_health_label_case_insensitive(monkeypatch):
+    """Runner carries label 'Light' (mixed-case); EXPECTED_CAPABILITIES=['light'] → no alert."""
+    monkeypatch.setattr(appmod, "EXPECTED_CAPABILITIES", ["light"])
+
+    async def fake_list_runners(client):
+        return [
+            {
+                "name": "gh-runner-light-host-1",
+                "status": "online",
+                "busy": False,
+                "labels": [{"name": "Light"}, {"name": "self-hosted"}],
+            },
+        ]
+
+    monkeypatch.setattr(appmod, "_list_runners", fake_list_runners)
+    r = client.get("/fleet-health", headers={"Authorization": "Bearer test-broker-secret"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["alerts"] == []
+
+
+def test_aggregate_fleet_by_label():
+    """_aggregate_fleet produces by_label with lowercased keys and correct total/online/busy."""
+    runners = [
+        {
+            "name": "gh-runner-light-host-1",
+            "status": "online",
+            "busy": False,
+            "labels": [{"name": "Light"}, {"name": "self-hosted"}],
+        },
+        {
+            "name": "gh-runner-light-host-2",
+            "status": "offline",
+            "busy": False,
+            "labels": [{"name": "Light"}, {"name": "self-hosted"}],
+        },
+        {
+            "name": "gh-runner-supabase-host-1",
+            "status": "online",
+            "busy": True,
+            "labels": [{"name": "supabase"}, {"name": "self-hosted"}],
+        },
+    ]
+    fleet = appmod._aggregate_fleet(runners)
+    by_label = fleet["by_label"]
+
+    # keys are lowercased regardless of source case
+    assert "light" in by_label
+    assert "Light" not in by_label
+    assert by_label["light"]["total"] == 2
+    assert by_label["light"]["online"] == 1
+    assert by_label["light"]["busy"] == 0
+    assert by_label["supabase"]["total"] == 1
+    assert by_label["supabase"]["online"] == 1
+    assert by_label["supabase"]["busy"] == 1
+    # shared label across all three runners
+    assert by_label["self-hosted"]["total"] == 3
+
+
+def test_fleet_health_requires_auth():
+    """GET /fleet-health returns 401 without auth or with wrong bearer."""
+    assert client.get("/fleet-health").status_code == 401
+    assert client.get("/fleet-health", headers={"Authorization": "Bearer nope"}).status_code == 401
+
+
+# --- existing variant tests continue below -------------------------------------------------------
 
 
 def test_fleet_update_malformed_variant_treated_as_absent(monkeypatch):
