@@ -1,6 +1,7 @@
 # Fleet design — comprehensive runner coverage for `gyeolhada-team`
 
-Status: **proposal + in-progress**. Authored 2026-06-26 from an audit of all `gyeolhada-team` repos.
+Status: **core capabilities shipped** (playwright, self-update fleet-wide — release fleet-2026.06.29.1).
+Authored 2026-06-26 from an audit of all `gyeolhada-team` repos; updated 2026-07-06.
 This doc is the cross-cutting map: who needs CI compute, what capability classes exist, the target
 fleet topology, and the roadmap. Per-runner-type mechanics stay in each dir's README.
 
@@ -41,18 +42,20 @@ any online runner carrying that label (on any host) can serve it.
 | `mobile,android` | official runner image + KVM | emulator, Java/adb/SDK, Maestro | frontend android-e2e |
 | `mobile,ios` | macOS launchd | Xcode, iOS simulator, Maestro | frontend ios / maestro suites |
 | `heavy` / `ml` | `light` + persistent dep cache | pre-warmed torch/transformers, big RAM | test-profiles nightly |
+| `windows` (`light` variant) | vanilla actions/runner + Task Scheduler (Windows, no NSSM) | Windows-native runtime | Windows-specific jobs |
 
-`light`/`supabase`/`android`/`ios` already exist as gh-runners types. `playwright` and `heavy` are the
-new capability layers — both are thin extensions of `light`, not new runner types.
+`light`/`supabase`/`playwright`/`android`/`ios`/`windows` all exist as gh-runners types or variants.
+`playwright` and `heavy` are thin extensions of `light`, not distinct runner types; `windows` is the
+`light` capability on a Windows host (Task Scheduler instead of systemd).
 
-## The `playwright` capability (this PR)
+## The `playwright` capability
 
 **Problem.** `staff-portal` and `location-service` run `playwright install --with-deps`, which needs
 **root apt** to install Chromium's shared libraries. On the Debian LXC `light` host that either fails
 or forces a fallback to `ubuntu-latest`, and even when it works it re-downloads browsers (~5–10 min)
 every job.
 
-**Design.** Split the two costs:
+**Design (shipped — PR #10 `--with-playwright`, PR #11 `--runner-type`).** Split the two costs:
 1. **System libs (root, stable):** install once at provision time via `playwright install-deps`
    (`light/install.sh --with-playwright`). This is the part that genuinely needs root; it changes
    rarely (tied to the OS, not the repo's Playwright version).
@@ -61,29 +64,31 @@ every job.
    The first job that needs a given browser version populates it; all later jobs reuse it. Jobs then
    run plain `playwright install chromium` (no `--with-deps`, no root) and it's a cache hit.
 3. **Label:** `--with-playwright` appends `playwright` to the runner's labels so browser jobs target it.
+   `--runner-type playwright` registers a dedicated instance with only the `playwright` label (no `light`).
 
-Consumer change: drop `--with-deps` and add `runs-on` of the `playwright` capability (still behind
-`pick-runner` with `ubuntu-latest` fallback). On the fallback path `--with-deps` is unnecessary because
+Consumer pattern: drop `--with-deps`; set `runs-on` to the `playwright` label (behind `pick-runner`
+with `ubuntu-latest` fallback). On the fallback path `--with-deps` is unnecessary because
 GitHub-hosted images already ship the libs.
 
 ## Target topology (end-state)
 
 | Pool / label | Host | Count (now → target) | Serves |
 |---|---|---|---|
-| `light` | pve CT102 | 2 → 3 | all lint/unit/build, Python services, schemas |
-| `playwright` | pve CT102 (light + browsers) | 0 → 1 | staff-portal, location-service e2e |
-| `supabase` | pve CT102 (host Docker) | 1 → 2 | api e2e + Python DB integration |
-| `mobile,android` | pve CT102 (KVM) | 1 | frontend android-e2e |
+| `light` | mind2 CT102 | 2 → 3 | all lint/unit/build, Python services, schemas |
+| `playwright` | mind2 CT102 (light + browsers) | 1 | staff-portal, location-service e2e |
+| `supabase` | mind2 (dedicated per-runner LXCs, one Docker daemon each) | 2 | api e2e + Python DB integration |
+| `mobile,android` | mind2 CT102 (KVM) | 1 | frontend android-e2e |
 | `mobile,ios` | Mac(s) | 1 → 2 | frontend ios / maestro suites |
-| `heavy`/`ml` | pve (persistent cache) | 0 → 1 | test-profiles nightly |
+| `heavy`/`ml` | mind2 (persistent cache) | 0 → 1 | test-profiles nightly |
 
-Capacity is the real constraint (one pve host + one M4 Mac). "Comprehensive" means **capability
+Capacity is the real constraint (one mind2 host + one M4 Mac). "Comprehensive" means **capability
 coverage first**, then headroom where a queue actually forms (supabase serialises behind api; macOS is
 the scarce premium tier).
 
 ## Roadmap
 
-1. **`playwright` capability** — provision in `light/install.sh`; document; (this PR).
+1. **`playwright` capability** — Done (PR #10/#11, 2026-06-26). Provisioned via `light/install.sh
+   --with-playwright`; `--runner-type playwright` for dedicated instances.
 2. **Onboard Python services** — give `gyeolhada-match`, `tier-service`, `post-match-service`,
    `location-service` the self-hosted selector → `light` pool (ubuntu fallback); `location-service`
    also takes `playwright`.
@@ -93,9 +98,8 @@ the scarce premium tier).
 4. **macOS cost** — move the heavy Maestro suites (`maestro-e2e` 120m, `me-migration-e2e` 90m) off
    GitHub-hosted `macos-15` onto the self-hosted Mac; add a 2nd Mac if a queue forms.
 5. **`heavy`/`ml`** — persistent uv/pip cache + pre-warmed torch for `test-profiles`.
-6. **DRY the selector (deferred)** — once all runners are online, extract the copy-pasted
-   `pick-runner` job into a reusable workflow in `gyeolhada-team/.github` so every repo adopts
-   self-hosted with one `uses:` line. Deferred deliberately until the fleet is proven up.
+6. **DRY the selector** — Done (as of 2026-07, per operator): extracted to `gyeolhada-team/.github`;
+   all repos converted to a single `uses:` line.
 
 ## Non-goals
 
