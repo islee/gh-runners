@@ -7,6 +7,9 @@
 #   3. After a completed job: clear crash counter, snapshot last_good/, check for fleet-code update.
 #   4. Re-register clean. Repeat.
 #
+# When USE_JIT=1 (opt-in, requires the broker): steps 1-2 are replaced by a single _jit_cycle()
+# call — the broker mints a pre-configured JIT runner config and run.sh --jitconfig runs one job.
+#
 # Token priority (checked in order): RUNNER_TOKEN (static) → BROKER_URL (broker) → ACCESS_TOKEN (PAT).
 # config.env (mode 600, written by install.sh) lives in this script's dir and supplies the values.
 #
@@ -52,6 +55,12 @@ ACCESS_TOKEN="${ACCESS_TOKEN:-}"
 : "${BROKER_SECRET:=}"   # default-assign to satisfy `set -u`
 RUNNER_DIR="${SCRIPT_DIR}"
 REGISTRATION_RETRY_SECONDS=30
+
+# JIT runner-config path (opt-in). When enabled, each cycle fetches a pre-configured JIT config
+# from the broker (POST /jitconfig) instead of a registration token, then runs exactly one job via
+# run.sh --jitconfig. supabase/ios/android/windows still use the registration-token path.
+# NOTE: USE_JIT=1 requires BROKER_URL — the broker holds the GitHub App key for generate-jitconfig.
+USE_JIT="${USE_JIT:-0}"
 
 # Fleet self-update knobs (written by install.sh; self-update.sh reads them from config.env directly).
 AUTO_UPDATE="${AUTO_UPDATE:-1}"
@@ -102,6 +111,9 @@ except Exception:
 _CURRENT_REG_TOKEN=""
 _shutdown() {
   log "Caught signal — deregistering runner and exiting."
+  # JIT runners are pre-configured by GitHub and auto-cleaned after the job; there is no local
+  # registration to remove and no remove-token to mint. Exit immediately.
+  if [[ "${USE_JIT}" == "1" ]]; then exit 0; fi
   # Best-effort: a removal needs a remove-token. Reuse the broker/PAT to mint one when possible;
   # fall back to the current registration token. Never fail the trap (token may be expired already).
   local _rm=""
@@ -180,6 +192,113 @@ _acquire_reg_token() {
   fatal "No credential available (RUNNER_TOKEN, BROKER_URL, ACCESS_TOKEN all unset). Fix config.env."
 }
 
+# ── JIT runner-config acquisition ─────────────────────────────────────────────
+# Sets JIT_CONFIG on success. Returns 0 on success, 1 on retryable failure.
+# WHY: on the JIT path the broker mints a pre-configured one-shot runner config via the GitHub
+# generate-jitconfig API. The broker validates name + labels before minting — closing the
+# label-enforcement gap that the registration-token path cannot close.
+JIT_CONFIG=""
+_acquire_jitconfig() {
+  JIT_CONFIG=""
+  FLEET_DESIRED_REF=""
+  FLEET_MANIFEST_SHA256=""
+  FLEET_MIN_VERSION=""
+
+  # JIT requires the broker — only the broker holds the App key for generate-jitconfig.
+  # Fail hard rather than silently falling back to registration-token mode.
+  [[ -n "${BROKER_URL}" ]] \
+    || fatal "USE_JIT=1 requires BROKER_URL (the broker mints the JIT config). Fix config.env."
+
+  log "Fetching JIT config from broker: $(_mask_url "${BROKER_URL}")"
+
+  # Build the JSON body via python3 to safely quote RUNNER_NAME and split RUNNER_LABELS.
+  # NOTE: RUNNER_LABELS is comma-separated (e.g. "self-hosted,linux,x64,light"); the broker
+  # expects a JSON array. Never hand-roll JSON in bash to avoid quoting edge-cases.
+  local _body _raw
+  _body="$(python3 -c "
+import json, sys
+name = sys.argv[1]
+labels = [l.strip() for l in sys.argv[2].split(',') if l.strip()]
+print(json.dumps({'name': name, 'labels': labels}))
+" "${RUNNER_NAME}" "${RUNNER_LABELS}")" \
+    || { warn "Failed to build JIT config request body."; return 1; }
+
+  _raw="$(curl --silent --fail --max-time 15 -X POST \
+    -H "Authorization: Bearer ${BROKER_SECRET}" \
+    -H "X-Runner-Name: ${RUNNER_NAME}" \
+    -H "X-Fleet-Version: ${FLEET_VERSION}" \
+    -H "Content-Type: application/json" \
+    --data "${_body}" \
+    "${BROKER_URL%/}/jitconfig")" \
+    || { warn "Broker jitconfig request failed (BROKER_URL/BROKER_SECRET?)."; return 1; }
+
+  JIT_CONFIG="$(echo "${_raw}" | _json_field encoded_jit_config)" \
+    || { warn "Broker jitconfig response is unparseable."; return 1; }
+  [[ -n "${JIT_CONFIG}" ]] \
+    || { warn "Broker returned an empty encoded_jit_config."; return 1; }
+
+  # Parse optional fleet_update (same format as the registration-token path).
+  # WHY reuse _parse_fleet_update: the broker embeds fleet_update in /jitconfig responses by the
+  # same rule as /token — so post-job self-update works identically on both paths.
+  { read -r FLEET_DESIRED_REF
+    read -r FLEET_MANIFEST_SHA256
+    read -r FLEET_MIN_VERSION
+  } < <(echo "${_raw}" | _parse_fleet_update 2>/dev/null) \
+    || { FLEET_DESIRED_REF=""; FLEET_MANIFEST_SHA256=""; FLEET_MIN_VERSION=""; }
+
+  return 0
+}
+
+# ── One JIT ephemeral cycle ────────────────────────────────────────────────────
+# Acquires a JIT config (with exponential-backoff retries), then runs exactly one job via
+# run.sh --jitconfig. GitHub auto-cleans JIT runners post-job — no config.sh / --replace step.
+# Post-job bookkeeping and fleet-code self-update mirror the registration-token path.
+_jit_cycle() {
+  local _retry=0 _exp _backoff
+  while true; do
+    if _acquire_jitconfig; then break; fi
+    _retry=$(( _retry + 1 ))
+    _exp=$(( _retry - 1 ))
+    (( _exp > 6 )) && _exp=6
+    _backoff=$(( REGISTRATION_RETRY_SECONDS * (2 ** _exp) ))
+    (( _backoff > 300 )) && _backoff=300
+    _backoff=$(( _backoff + (RANDOM % 15) ))
+    warn "JIT config acquisition failed (attempt ${_retry}) — retrying in ${_backoff}s."
+    sleep "${_backoff}"
+  done
+
+  log "JIT config acquired for ${RUNNER_NAME}. Waiting for a job..."
+  # run.sh --jitconfig: the runner is already pre-configured (no config.sh step) and exits after
+  # exactly one job. Inherently ephemeral — GitHub cleans the registration automatically.
+  local _run_exit=0
+  nice -n "${NICE_PRIORITY}" "${RUNNER_DIR}/run.sh" --jitconfig "${JIT_CONFIG}" \
+    || _run_exit=$?
+
+  _prune_docker
+
+  if (( _run_exit != 0 )); then
+    warn "run.sh (jit) exited non-zero (${_run_exit}) — next cycle will re-acquire config."
+  else
+    log "JIT job complete. Running post-job bookkeeping and update check."
+    _record_job_complete
+
+    # Post-job fleet-code update — identical to the registration-token path.
+    if [[ -n "${FLEET_DESIRED_REF}" && -n "${FLEET_MANIFEST_SHA256}" ]]; then
+      local _su_exit=0
+      "${RUNNER_DIR}/self-update.sh" "${FLEET_DESIRED_REF}" "${FLEET_MANIFEST_SHA256}" \
+        || _su_exit=$?
+      if (( _su_exit == 77 )); then
+        log "Fleet-code update applied — exiting for supervisor to relaunch new payload."
+        exit 0
+      elif (( _su_exit != 0 )); then
+        warn "self-update.sh returned ${_su_exit} (non-fatal, continuing loop)."
+      fi
+    fi
+
+    log "Re-acquiring JIT config for next job."
+  fi
+}
+
 # ── Post-job bookkeeping — clear crash counter and snapshot last_good/ ─────────
 # Called after run.sh exits 0 (a job completed successfully). Records a verified-good state so
 # runner-bootstrap.sh can roll back to it if a subsequent fleet-code update causes crash-loops.
@@ -216,10 +335,12 @@ _prune_docker() {
 
 # ── SELFTEST exit point — after all function definitions, before main loop ─────
 if [[ "${_SELFTEST}" == "1" ]]; then
-  type _acquire_reg_token &>/dev/null || exit 1
-  type _shutdown         &>/dev/null || exit 1
+  type _acquire_reg_token   &>/dev/null || exit 1
+  type _shutdown            &>/dev/null || exit 1
   type _record_job_complete &>/dev/null || exit 1
-  type _prune_docker &>/dev/null || exit 1
+  type _prune_docker        &>/dev/null || exit 1
+  type _acquire_jitconfig   &>/dev/null || exit 1
+  type _jit_cycle           &>/dev/null || exit 1
   exit 0
 fi
 
@@ -233,6 +354,10 @@ NICE_PRIORITY="${NICE_PRIORITY:-10}"
 RETRY_ATTEMPT=0
 
 while true; do
+  # JIT path: delegate the entire cycle to _jit_cycle, then loop for the next job.
+  # The registration-token block below is untouched and only runs when USE_JIT is off.
+  if [[ "${USE_JIT}" == "1" ]]; then _jit_cycle; continue; fi
+
   log "Acquiring registration token..."
   if ! _acquire_reg_token; then
     RETRY_ATTEMPT=$(( RETRY_ATTEMPT + 1 ))

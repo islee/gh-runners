@@ -64,6 +64,7 @@ light and supabase runners share a host), and enables `gh-runner-light@1 .. gh-r
 | `--playwright-version` | latest | Pin the `playwright` npm version used to install deps/browsers |
 | `--playwright-browser` | `chromium` | Browser to install deps for and pre-warm |
 | `--playwright-browsers-path` | `/opt/ms-playwright` | Shared, persistent browser cache (`PLAYWRIGHT_BROWSERS_PATH`) |
+| `--use-jit` | off | Opt-in JIT runner-config path — requires `--broker-url`; see [JIT path](#jit-runner-config-path-opt-in) |
 
 > **Runner names:** each instance registers as `gh-runner-light-<owner>-<i>` (the
 > `gh-runner-<type>-<id>-<n>` convention) — fixed per instance, re-registered each cycle with `--replace`.
@@ -113,6 +114,25 @@ sudo ./install.sh --broker-url "$BROKER_URL" --broker-secret "$BROKER_SECRET" \
 
 To instead make the existing light runners browser-capable (no separate runner), just add
 `--with-playwright` to the light install — they keep the `light` label and gain `playwright`.
+
+## JIT runner-config path (opt-in)
+
+Pass `--use-jit` (or set `USE_JIT=1` in `config.env`) to switch from the registration-token flow
+to the **JIT (just-in-time) config flow**. Requires `BROKER_URL` + `BROKER_SECRET`.
+
+Instead of fetching a registration token and calling `config.sh --ephemeral`, each cycle:
+1. POSTs to `$BROKER_URL/jitconfig` with the runner name and labels.
+2. Receives an `encoded_jit_config` blob (the broker calls GitHub's `generate-jitconfig` API).
+3. Passes the blob directly to `run.sh --jitconfig`. No `config.sh` step needed.
+4. GitHub auto-cleans the runner registration after the job — no remove-token step.
+
+**Label enforcement:** the broker validates the runner name and (optionally) every requested label
+against `ALLOWED_LABELS` before calling GitHub. This is the first real label-enforcement the fleet
+has — labels on the registration-token path are self-assigned by the runner and cannot be
+restricted by the broker.
+
+> **Scope:** this JIT path applies to `light/` runners only. supabase, ios, android, and windows
+> runners still use the registration-token path. JIT migration for those is a deliberate follow-up.
 
 ## Credentials
 Supply exactly one (priority high → low):

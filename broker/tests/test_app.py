@@ -850,3 +850,177 @@ def test_fleet_update_malformed_variant_treated_as_absent(monkeypatch):
     assert (
         "fleet_update" not in r.json()
     ), f"malformed variant must be treated as absent: {r.json()}"
+
+
+# --- /jitconfig endpoint -------------------------------------------------------------------------
+
+
+async def _fake_generate_jitconfig(name: str, labels: list[str], group_id: int) -> dict:
+    """Stand-in for _generate_jitconfig; returns canned response without GitHub."""
+    return {"encoded_jit_config": "BLOB", "runner": {"id": 1}}
+
+
+def test_jitconfig_without_auth_is_401():
+    r = client.post("/jitconfig", json={"name": "gh-runner-light-host-1", "labels": ["light"]})
+    assert r.status_code == 401
+
+
+def test_jitconfig_with_wrong_secret_is_401():
+    r = client.post(
+        "/jitconfig",
+        json={"name": "gh-runner-light-host-1", "labels": ["light"]},
+        headers={"Authorization": "Bearer nope"},
+    )
+    assert r.status_code == 401
+
+
+def test_jitconfig_valid_name_passes(monkeypatch):
+    monkeypatch.setattr(appmod, "_generate_jitconfig", _fake_generate_jitconfig)
+    monkeypatch.setattr(appmod, "ALLOWED_LABELS", set())
+    r = client.post(
+        "/jitconfig",
+        json={"name": "gh-runner-light-host-1", "labels": ["light"]},
+        headers={"Authorization": "Bearer test-broker-secret"},
+    )
+    assert r.status_code == 200
+
+
+def test_jitconfig_invalid_names_are_400(monkeypatch):
+    """Names that don't match gh-runner-<type>-<id>-<n> convention are rejected."""
+    monkeypatch.setattr(appmod, "_generate_jitconfig", _fake_generate_jitconfig)
+    monkeypatch.setattr(appmod, "ALLOWED_LABELS", set())
+    for bad_name in ("foo", "gh-runner-", "GH-RUNNER-x"):
+        r = client.post(
+            "/jitconfig",
+            json={"name": bad_name, "labels": ["light"]},
+            headers={"Authorization": "Bearer test-broker-secret"},
+        )
+        assert r.status_code == 400, f"expected 400 for name={bad_name!r}, got {r.status_code}"
+
+
+def test_jitconfig_allowed_labels_off_accepts_any(monkeypatch):
+    """Empty ALLOWED_LABELS (default) → no restriction; any labels are accepted."""
+    monkeypatch.setattr(appmod, "_generate_jitconfig", _fake_generate_jitconfig)
+    monkeypatch.setattr(appmod, "ALLOWED_LABELS", set())
+    r = client.post(
+        "/jitconfig",
+        json={"name": "gh-runner-light-host-1", "labels": ["arbitrary", "custom", "labels"]},
+        headers={"Authorization": "Bearer test-broker-secret"},
+    )
+    assert r.status_code == 200
+
+
+def test_jitconfig_allowed_labels_on_accepts_in_set(monkeypatch):
+    """Labels that are all in ALLOWED_LABELS are accepted."""
+    monkeypatch.setattr(appmod, "_generate_jitconfig", _fake_generate_jitconfig)
+    monkeypatch.setattr(appmod, "ALLOWED_LABELS", {"light", "self-hosted"})
+    r = client.post(
+        "/jitconfig",
+        json={"name": "gh-runner-light-host-1", "labels": ["light", "self-hosted"]},
+        headers={"Authorization": "Bearer test-broker-secret"},
+    )
+    assert r.status_code == 200
+
+
+def test_jitconfig_allowed_labels_on_rejects_out_of_set(monkeypatch):
+    """A label absent from ALLOWED_LABELS causes a 400."""
+    monkeypatch.setattr(appmod, "_generate_jitconfig", _fake_generate_jitconfig)
+    monkeypatch.setattr(appmod, "ALLOWED_LABELS", {"light"})
+    r = client.post(
+        "/jitconfig",
+        json={"name": "gh-runner-light-host-1", "labels": ["light", "unknown-label"]},
+        headers={"Authorization": "Bearer test-broker-secret"},
+    )
+    assert r.status_code == 400
+
+
+def test_jitconfig_allowed_labels_case_insensitive(monkeypatch):
+    """Label matching is case-insensitive: 'Light' matches allowlist entry 'light'."""
+    monkeypatch.setattr(appmod, "_generate_jitconfig", _fake_generate_jitconfig)
+    monkeypatch.setattr(appmod, "ALLOWED_LABELS", {"light"})
+    r = client.post(
+        "/jitconfig",
+        json={"name": "gh-runner-light-host-1", "labels": ["Light"]},
+        headers={"Authorization": "Bearer test-broker-secret"},
+    )
+    assert r.status_code == 200
+
+
+def test_jitconfig_empty_labels_is_400(monkeypatch):
+    """An empty labels list is rejected before reaching GitHub."""
+    monkeypatch.setattr(appmod, "_generate_jitconfig", _fake_generate_jitconfig)
+    monkeypatch.setattr(appmod, "ALLOWED_LABELS", set())
+    r = client.post(
+        "/jitconfig",
+        json={"name": "gh-runner-light-host-1", "labels": []},
+        headers={"Authorization": "Bearer test-broker-secret"},
+    )
+    assert r.status_code == 400
+
+
+def test_jitconfig_happy_path_response_and_activity(monkeypatch):
+    """200 body carries encoded_jit_config + runner passthrough; activity records kind=jitconfig."""
+    monkeypatch.setattr(appmod, "_generate_jitconfig", _fake_generate_jitconfig)
+    monkeypatch.setattr(appmod, "ALLOWED_LABELS", set())
+
+    captured: dict = {}
+
+    def _capture_persist(kind: str, name: str | None, fleet_version: str | None = None) -> None:
+        captured["kind"] = kind
+        captured["name"] = name
+        captured["fleet_version"] = fleet_version
+
+    monkeypatch.setattr(appmod, "_persist", _capture_persist)
+
+    r = client.post(
+        "/jitconfig",
+        json={"name": "gh-runner-light-host-1", "labels": ["light"]},
+        headers={
+            "Authorization": "Bearer test-broker-secret",
+            "X-Fleet-Version": "2026.06.29.1",
+        },
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["encoded_jit_config"] == "BLOB", f"expected BLOB, got {body}"
+    assert body["runner"] == {"id": 1}, f"expected runner passthrough, got {body}"
+    assert captured.get("kind") == "jitconfig", f"expected kind=jitconfig, got {captured}"
+    assert captured.get("name") == "gh-runner-light-host-1"
+    # fleet_version threads through for parity with /token stats.
+    assert captured.get("fleet_version") == "2026.06.29.1", f"fleet_version dropped: {captured}"
+
+
+def test_jitconfig_includes_fleet_update_when_configured(monkeypatch):
+    """/jitconfig attaches fleet_update (per-type hash) so JIT runners self-update like /token."""
+    monkeypatch.setattr(appmod, "_generate_jitconfig", _fake_generate_jitconfig)
+    monkeypatch.setattr(appmod, "ALLOWED_LABELS", set())
+    monkeypatch.setattr(appmod, "FLEET_DESIRED_REF", "v2026.06.29.1")
+    monkeypatch.setattr(appmod, "_fleet_manifest_map", {"light": "abc123def456"})
+    monkeypatch.setattr(appmod, "FLEET_MIN_VERSION", "2026.06.29.1")
+
+    r = client.post(
+        "/jitconfig",
+        json={"name": "gh-runner-light-host-1", "labels": ["light"]},
+        headers={"Authorization": "Bearer test-broker-secret"},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert "fleet_update" in body, f"expected fleet_update in {body}"
+    assert body["fleet_update"]["manifest_sha256"] == "abc123def456"
+    assert body["fleet_update"]["desired_ref"] == "v2026.06.29.1"
+
+
+def test_jitconfig_omits_fleet_update_when_dormant(monkeypatch):
+    """No fleet_update key when the self-update feature is dormant (FLEET_DESIRED_REF unset)."""
+    monkeypatch.setattr(appmod, "_generate_jitconfig", _fake_generate_jitconfig)
+    monkeypatch.setattr(appmod, "ALLOWED_LABELS", set())
+    monkeypatch.setattr(appmod, "FLEET_DESIRED_REF", None)
+    monkeypatch.setattr(appmod, "_fleet_manifest_map", {})
+
+    r = client.post(
+        "/jitconfig",
+        json={"name": "gh-runner-light-host-1", "labels": ["light"]},
+        headers={"Authorization": "Bearer test-broker-secret"},
+    )
+    assert r.status_code == 200
+    assert "fleet_update" not in r.json()

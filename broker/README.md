@@ -47,6 +47,7 @@ the repo-root `.github/workflows/ci.yml`.)
 |--------|------|------|---------|
 | `POST` | `/token` | `Bearer $BROKER_SECRET` | `{"token","expires_at","url"[,"fleet_update"]}` registration token |
 | `POST` | `/remove-token` | `Bearer $BROKER_SECRET` | `{"token","expires_at"}` |
+| `POST` | `/jitconfig` | `Bearer $BROKER_SECRET` | `{"encoded_jit_config","runner"[,"fleet_update"]}` JIT runner config |
 | `GET` | `/stats` | `Bearer $BROKER_SECRET` | recent token activity by type / host / runner + capability alerts |
 | `GET` | `/fleet-health` | `Bearer $BROKER_SECRET` | `{"ok":bool,"alerts":[...]}` — lightweight check for uptime monitors |
 | `GET` | `/health` | none | `{"ok":true}` |
@@ -55,9 +56,50 @@ Optional `X-Runner-Name` header is logged for attribution **and feeds `/stats`**
 Optional `X-Fleet-Version` header reports the runner's current fleet-code version — logged and
 surfaced in `/stats.activity.runners[].fleet_version`. See **Fleet self-update trust anchor** below.
 
-> **Labels are NOT enforceable by this service.** A runner self-assigns its labels at `config.sh
-> --labels` time; they are not encoded in the registration token, so the broker cannot restrict them.
-> Scope what runners may do with **GitHub runner groups**, not this broker.
+> **On the registration-token path (`/token`), labels are NOT enforceable by this service.** A
+> runner self-assigns its labels at `config.sh --labels` time; they are not encoded in the
+> registration token, so the broker cannot restrict them. Scope what runners may do with **GitHub
+> runner groups**, not this broker.
+>
+> **Labels ARE enforceable on the JIT path (`/jitconfig`).** The broker validates every requested
+> label against `ALLOWED_LABELS` before calling `generate-jitconfig`, so only approved labels can
+> be embedded into a JIT config. This is the label-enforcement win the registration-token path
+> never had.
+
+## JIT runner config (`/jitconfig`)
+
+`POST /jitconfig` (auth-gated, rate-limited) mints a **JIT (just-in-time) runner config** via the
+GitHub `generate-jitconfig` API instead of a bare registration token. JIT-configured runners are
+pre-configured at fetch time, are inherently ephemeral, and are automatically cleaned up by GitHub
+after the job — no `config.sh` or remove-token step on the runner side.
+
+Request body (JSON):
+```json
+{ "name": "gh-runner-light-my-host-1", "labels": ["self-hosted", "linux", "x64", "light"] }
+```
+
+Response (200):
+```jsonc
+{
+  "encoded_jit_config": "<base64 string — pass directly to run.sh --jitconfig>",
+  "runner": { "id": 1234, "name": "gh-runner-light-my-host-1", … },
+  "fleet_update": { … }   // present only when FLEET_DESIRED_REF is configured
+}
+```
+
+Validation before calling GitHub:
+1. `name` must match `gh-runner-[a-z0-9][a-z0-9-]*` (fleet naming convention).
+2. `labels` must be non-empty.
+3. When `ALLOWED_LABELS` is set, every label (case-insensitive) must be in the allowlist — else 400.
+
+### New env vars (all optional)
+
+| Var | Default | Purpose |
+|-----|---------|---------|
+| `GH_RUNNER_GROUP_ID` | `1` | Runner group to assign JIT runners to. Group 1 is the Default group (present in every org). Non-integer values warn and fall back to 1. |
+| `ALLOWED_LABELS` | *(empty)* | Comma-separated allowlist of labels the JIT endpoint will mint. Empty = no restriction. Non-empty = any label not in the set is rejected with 400. Case-insensitive match. |
+
+Example: `ALLOWED_LABELS=self-hosted,linux,x64,light,playwright`
 
 ## Rate limiting
 

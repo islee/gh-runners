@@ -53,6 +53,7 @@ Every runner accepts exactly one of three credentials (priority high → low):
 |-------|-------------|----------|
 | **A — static token** | `RUNNER_TOKEN` | Quick one-off/pilot. A bare registration token **expires ~1h**, so it only survives the first registration of a re-registering runner. |
 | **B — broker** (recommended) | `BROKER_URL` + `BROKER_SECRET` | Fleet/unattended. No GitHub credential on the runner; the [`broker/`](broker/) holds the GitHub App key and mints fresh tokens each cycle. |
+| **B-JIT — broker JIT** | `BROKER_URL` + `BROKER_SECRET` + `USE_JIT=1` | `light/` runners only (opt-in, `--use-jit`). The broker mints a JIT runner config (`generate-jitconfig`) instead of a registration token — `run.sh --jitconfig` skips `config.sh`, GitHub auto-cleans the runner. **Labels are broker-enforced via `ALLOWED_LABELS`** (unlike the registration-token path). |
 | **C — PAT** | `ACCESS_TOKEN` | Unattended without a broker. A **fine-grained PAT scoped to `organization_self_hosted_runners` only** — the runner mints fresh registration tokens via the GitHub REST API each cycle. **Never an org-admin PAT.** |
 
 ## Security model

@@ -11,9 +11,11 @@ FLOW per request: App JWT (RS256, ≤10 min) -> installation access token (cache
   POST /orgs/{org}/actions/runners/{registration|remove}-token.
 Callers authenticate with a shared BROKER_SECRET (Bearer). See README.md for setup + rationale.
 
-NOTE: labels are chosen by the runner at `config.sh --labels` time and are NOT encoded in the
-registration token, so the broker CANNOT enforce them — it only logs the caller (X-Runner-Name)
-for attribution. Use GitHub *runner groups* to scope what runners may do.
+NOTE: on the registration-token path (POST /token), labels are chosen by the runner at
+`config.sh --labels` time and are NOT encoded in the registration token, so the broker CANNOT
+enforce them — it only logs the caller (X-Runner-Name) for attribution. Use GitHub *runner
+groups* to scope what runners may do. Labels ARE enforceable on the JIT path (POST /jitconfig):
+the broker validates each requested label against ALLOWED_LABELS before minting the config.
 """
 
 from __future__ import annotations
@@ -32,6 +34,7 @@ from typing import Any
 import httpx
 import jwt
 from fastapi import FastAPI, Header, HTTPException, Request
+from pydantic import BaseModel
 
 GITHUB_API = "https://api.github.com"
 APP_ID = os.environ["GH_APP_ID"]
@@ -112,6 +115,39 @@ EXPECTED_CAPABILITIES = [
 # the key space predictable and matches typical Docker/OCI tag conventions.
 _VARIANT_RE = re.compile(r"^[a-z0-9-]+$")
 _VARIANT_MAX_LEN = 32
+
+# JIT runner-config path (POST /jitconfig). All vars are OPTIONAL — the JIT endpoint is purely
+# additive. No existing behaviour changes when these are absent.
+#
+# WHY GH_RUNNER_GROUP_ID: GitHub's generate-jitconfig API requires a runner_group_id; group 1 is
+# the Default runner group that exists in every org. Override when runners must land in a custom
+# group (the group controls queue access and job routing on the GitHub side).
+_raw_group_id = os.environ.get("GH_RUNNER_GROUP_ID", "1")
+GH_RUNNER_GROUP_ID: int = 1
+try:
+    GH_RUNNER_GROUP_ID = int(_raw_group_id)
+except ValueError:
+    log.warning(
+        "GH_RUNNER_GROUP_ID=%r is not a valid integer — defaulting to 1 (Default runner group)",
+        _raw_group_id,
+    )
+
+# WHY ALLOWED_LABELS: on the registration-token path (/token) labels are self-assigned by the
+# runner at config.sh time and the broker has no visibility into them. The JIT path closes this
+# gap: the broker validates every requested label against this set before minting the config,
+# giving operators the first real label-enforcement win. Empty set (default) disables the
+# restriction — any label is accepted. Non-empty set rejects any label not in the allowlist.
+_raw_allowed_labels = os.environ.get("ALLOWED_LABELS", "")
+ALLOWED_LABELS: set[str] = (
+    {lbl.lower() for lbl in _raw_allowed_labels.split(",") if lbl.strip()}
+    if _raw_allowed_labels.strip()
+    else set()
+)
+
+# Runner name must follow the fleet convention: gh-runner-<type>-<id>-<n>
+# (type = [a-z0-9], remainder = [a-z0-9-]). Enforced on the JIT path where the broker
+# controls the name that gets embedded into the JIT config.
+_JIT_NAME_RE = re.compile(r"^gh-runner-[a-z0-9][a-z0-9-]*$")
 
 # Background task set: keeps asyncio.Task references alive until they complete so fire-and-forget
 # persistence calls are not garbage-collected mid-flight.
@@ -803,6 +839,37 @@ async def _mint(kind: str) -> dict:
         raise HTTPException(status_code=502, detail="github upstream error") from e
 
 
+async def _generate_jitconfig(name: str, labels: list[str], group_id: int) -> dict:
+    """Call the GitHub generate-jitconfig API and return the parsed response JSON.
+
+    Uses the same installation token as _mint() (same Self-hosted runners org permission,
+    no new credential required). On any HTTP error raises HTTPException(502) so the caller
+    gets a clean 502 rather than an unhandled exception.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            tok = await _installation_token(client)
+            r = await client.post(
+                f"{GITHUB_API}/orgs/{ORG}/actions/runners/generate-jitconfig",
+                headers={
+                    "Authorization": f"Bearer {tok}",
+                    "Accept": "application/vnd.github+json",
+                    "X-GitHub-Api-Version": "2022-11-28",
+                },
+                json={
+                    "name": name,
+                    "runner_group_id": group_id,
+                    "labels": labels,
+                    "work_folder": "_work",
+                },
+            )
+            r.raise_for_status()
+            return r.json()
+    except httpx.HTTPError as e:
+        log.error("github error generating jitconfig for runner=%s: %s", name, e)
+        raise HTTPException(status_code=502, detail="github upstream error") from e
+
+
 async def _list_runners(client: httpx.AsyncClient) -> list[dict]:
     """Fetch all org runners from GitHub, paginating until a short page.
 
@@ -998,6 +1065,77 @@ async def remove_token(
         x_fleet_version or "?",
     )
     return {"token": d["token"], "expires_at": d["expires_at"]}
+
+
+class JitConfigRequest(BaseModel):
+    name: str
+    labels: list[str]
+
+
+@app.post("/jitconfig")
+async def jitconfig(
+    request: Request,
+    body: JitConfigRequest,
+    authorization: str | None = Header(default=None),
+    x_fleet_version: str | None = Header(default=None),
+) -> dict:
+    """Mint a JIT runner config via the generate-jitconfig GitHub API.
+
+    Auth-gated (Bearer BROKER_SECRET) and rate-limited (same as /token).
+
+    Validates:
+      1. Runner name matches _JIT_NAME_RE (gh-runner-<type>-<id>-<n> convention).
+      2. Labels list is non-empty.
+      3. When ALLOWED_LABELS is configured, every label (case-insensitive) must be in the set.
+         This is the label-enforcement win the registration-token path never had: the broker
+         controls what labels get embedded into the JIT config before it leaves the service.
+
+    Returns: {"encoded_jit_config": <base64 str>, "runner": <runner object>[, "fleet_update": ...]}
+    """
+    _rate_limit(request)
+    _check_auth(authorization)
+
+    # 1. Name must match the fleet naming convention.
+    if not _JIT_NAME_RE.match(body.name):
+        raise HTTPException(status_code=400, detail="invalid runner name")
+
+    # 2. Labels list must be non-empty (GitHub requires at least one label).
+    if not body.labels:
+        raise HTTPException(status_code=400, detail="labels must be non-empty")
+
+    # 3. When ALLOWED_LABELS is configured, reject any label not in the allowlist.
+    # WHY lowercase: label matching is case-insensitive per GitHub convention; normalising
+    # here lets operators configure the allowlist without worrying about case.
+    if ALLOWED_LABELS:
+        for lbl in body.labels:
+            if lbl.lower() not in ALLOWED_LABELS:
+                raise HTTPException(status_code=400, detail=f"label not allowed: {lbl}")
+
+    d = await _generate_jitconfig(body.name, body.labels, GH_RUNNER_GROUP_ID)
+
+    # Record activity under a new "jitconfig" kind (additive — existing kind counters unaffected).
+    # Pass fleet_version through for parity with /token so JIT-path runners keep fleet-version
+    # observability in the stats backends.
+    _persist("jitconfig", body.name, fleet_version=x_fleet_version)
+    log.info(
+        "minted jitconfig for runner=%s labels_count=%d fleet_version=%s",
+        body.name,
+        len(body.labels),
+        x_fleet_version or "?",
+    )
+
+    # Attach fleet_update for JIT-path runners so post-job self-update works identically to the
+    # registration-token path. Omit the key entirely when the feature is dormant or the type
+    # has no manifest entry — older runners that don't know this field are unaffected.
+    rtype = parse_runner_name(body.name)[0]
+    fu = _fleet_update_for(rtype)
+    resp: dict = {
+        "encoded_jit_config": d["encoded_jit_config"],
+        "runner": d.get("runner"),
+    }
+    if fu is not None:
+        resp["fleet_update"] = fu
+    return resp
 
 
 @app.get("/stats")

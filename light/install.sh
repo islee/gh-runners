@@ -69,6 +69,8 @@ AUTO_UPDATE="1"
 UPDATE_REPO="islee/gh-runners"
 UPDATE_REF=""           # empty = broker-driven per cycle (recommended); set to pin a specific ref
 UPDATE_MIN_INTERVAL="300"
+# JIT runner-config path (opt-in via --use-jit). Requires BROKER_URL/BROKER_SECRET.
+USE_JIT="0"
 
 # Job-runtime parity (see install_job_deps / provision_toolcache). GitHub-hosted runners ship a
 # baseline of tools that setup-* actions and typical jobs assume; a bare host has none, so jobs fail
@@ -125,12 +127,14 @@ while [[ $# -gt 0 ]]; do
     --update-repo)          UPDATE_REPO="$2";       shift 2 ;;   # source repo for raw.githubusercontent fetches
     --update-ref)           UPDATE_REF="$2";        shift 2 ;;   # pin a specific ref (empty = broker-driven)
     --update-min-interval)  UPDATE_MIN_INTERVAL="$2"; shift 2 ;; # seconds floor between update checks
+    --use-jit)              USE_JIT="1";            shift   ;;   # opt-in JIT-config path (requires --broker-url)
     *) echo "Unknown flag: $1" >&2
        echo "Usage: sudo $0 (--token T | --broker-url URL [--broker-secret S] | --access-token PAT)" >&2
        echo "         [--org ORG] [--runner-type TYPE] [--labels LABELS] [--count N] [--user USER] [--runner-base DIR] [--runner-version V]" >&2
        echo "         [--extra-packages \"p1 p2\"] [--skip-job-deps] [--toolcache-dir DIR] [--skip-toolcache] [--stage-python VER ...]" >&2
        echo "         [--with-playwright] [--playwright-version V] [--playwright-browser B] [--playwright-browsers-path DIR]" >&2
        echo "         [--no-auto-update] [--update-repo SLUG] [--update-ref REF] [--update-min-interval SECONDS]" >&2
+       echo "         [--use-jit]" >&2
        exit 1 ;;
   esac
 done
@@ -334,6 +338,8 @@ for i in $(seq 1 "${COUNT}"); do
   _write_kv UPDATE_REPO          "${UPDATE_REPO}"          "${CONFIG_ENV}"
   _write_kv UPDATE_REF           "${UPDATE_REF}"           "${CONFIG_ENV}"
   _write_kv UPDATE_MIN_INTERVAL  "${UPDATE_MIN_INTERVAL}"  "${CONFIG_ENV}"
+  # JIT runner-config path (default off; set with --use-jit).
+  _write_kv USE_JIT              "${USE_JIT}"              "${CONFIG_ENV}"
   chmod 600 "${CONFIG_ENV}"
 
   # Install fleet-code scripts (runner-loop.sh is the updatable payload; bootstrap is stable).
