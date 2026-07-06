@@ -1,6 +1,9 @@
 # Pre-commit lint + test + secret gate. Install once:  pre-commit install
 # Run on demand:  pre-commit run --all-files
 # Broker tests need the dev deps once:  pip install -r broker/requirements-dev.txt
+# Windows gate needs pwsh + PSScriptAnalyzer once:
+#   brew install powershell   (macOS) / see https://learn.microsoft.com/powershell/scripting/install
+#   pwsh -Command "Install-Module PSScriptAnalyzer -RequiredVersion 1.25.0 -Scope CurrentUser"
 # CI runs the same hooks (.github/workflows/ci.yml), so local == CI.
 #
 # Hooks summary:
@@ -9,6 +12,7 @@
 #   ruff / ruff-format — broker Python lint + format
 #   broker-pytest     — broker unit tests
 #   runner-selftest   — runner-loop.sh SELFTEST modes (light/supabase/ios) + bash -n on self-update.sh
+#   windows-ps        — PSScriptAnalyzer lint + runner-loop.ps1 SELFTEST (needs pwsh + PSScriptAnalyzer)
 #   trailing-whitespace / end-of-file-fixer / check-yaml / check-merge-conflict — hygiene
 #   detect-private-key / gitleaks — secret scan
 
@@ -64,4 +68,10 @@ repos:
         entry: bash tests/run-selftests.sh
         language: system
         files: ^(light|supabase|ios)/(runner-loop|self-update)\.sh$
+        pass_filenames: false
+      - id: windows-ps
+        name: windows PowerShell lint + selftest (pwsh + PSScriptAnalyzer)
+        entry: bash windows/run-ps-checks.sh
+        language: system             # needs: pwsh + PSScriptAnalyzer (see top comment)
+        files: ^windows/.*\.(ps1|psd1|sh)$
         pass_filenames: false

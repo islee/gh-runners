@@ -59,6 +59,13 @@
     .\install.ps1 -Org your-org -Token <REG_TOKEN> -Count 1
 #>
 
+# WHY: Register-ScheduledTask -Password requires a plain [string]; SecureString cannot be used
+# with this API (the credential is stored internally by the Task Scheduler service). Suppressing
+# PSAvoidUsingPlainTextForPassword on RunAsPassword for this reason.
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute(
+    'PSAvoidUsingPlainTextForPassword', 'RunAsPassword',
+    Justification = 'Register-ScheduledTask -Password requires a plain string; SecureString is not accepted by this Windows API.'
+)]
 [CmdletBinding()]
 param(
     [string]$Org           = 'your-org',
@@ -96,7 +103,8 @@ function Write-Warn  { param([string]$Msg) Write-Warning "[$(Get-Date -Format 'y
 function Write-Fatal { param([string]$Msg) Write-Error   "[$(Get-Date -Format 'yyyy-MM-ddTHH:mm:ss')] [ERROR] $Msg"; exit 1 }
 
 # Mask credentials embedded in a URL (https://user:secret@host -> https://***@host).
-function Mask-Url { param([string]$Url) $Url -replace '://[^@/]+@', '://***@' }
+# WHY: ConvertTo- is the approved verb for transform/format functions per PowerShell conventions.
+function ConvertTo-MaskedUrl { param([string]$Url) $Url -replace '://[^@/]+@', '://***@' }
 
 # ── Preflight ──────────────────────────────────────────────────────────────────
 # Require Windows (this script is Windows-only by design; ios/ covers macOS, light/ covers Linux).
@@ -159,6 +167,12 @@ $RunnerType = 'windows'
 # When the task runs as a non-admin -RunAsUser, that user is granted Read so runner-loop.ps1 (running
 # as that user) can still read its own config — without opening the file up to everyone.
 function Set-CredentialAcl {
+    # WHY: private internal helper called only within this script. Adding SupportsShouldProcess would
+    # require CmdletBinding + PSCmdlet machinery with no user-visible benefit for a script-internal function.
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute(
+        'PSUseShouldProcessForStateChangingFunctions', '',
+        Justification = 'Private internal helper; ShouldProcess adds overhead with no user-visible benefit here.'
+    )]
     param([string]$FilePath, [string]$ReadUser = '')
     $acl = Get-Acl $FilePath
     # Disable inheritance and strip all inherited entries first.

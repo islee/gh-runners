@@ -12,6 +12,30 @@ inbound ports).
 
 - Windows 10 / 11 or Windows Server 2019+ (`x64`).
 - PowerShell 5.1 or later (ships in-box on all supported Windows versions).
+
+### Developing / contributing (local gate)
+
+The pre-commit `windows-ps` hook requires `pwsh` (PowerShell 7+) and `PSScriptAnalyzer` on the
+host that runs `pre-commit`. This applies to **any OS** — the hook is not Windows-only.
+
+```bash
+# macOS
+brew install powershell
+pwsh -Command "Install-Module PSScriptAnalyzer -RequiredVersion 1.25.0 -Scope CurrentUser"
+
+# Linux — see https://learn.microsoft.com/powershell/scripting/install/installing-powershell-on-linux
+# then:
+pwsh -Command "Install-Module PSScriptAnalyzer -RequiredVersion 1.25.0 -Scope CurrentUser"
+
+# Windows (if not already present)
+winget install Microsoft.PowerShell
+pwsh -Command "Install-Module PSScriptAnalyzer -RequiredVersion 1.25.0 -Scope CurrentUser"
+```
+
+CI (ubuntu-latest) installs PSScriptAnalyzer pinned to 1.25.0 automatically — no manual step needed
+in CI. The `windows-ps` hook fails loudly with install instructions if `pwsh` is absent locally,
+rather than silently skipping (which would hide a parity gap between local and CI).
+
 - **Administrator rights** for install: Task Scheduler 'run whether logged on or not' and the
   ACL restriction on `config.env` both require elevation. By default the runner loop runs under
   `NT AUTHORITY\SYSTEM` (no interactive session needed) — but that means **CI jobs run as SYSTEM**.
