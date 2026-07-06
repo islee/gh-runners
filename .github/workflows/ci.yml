@@ -2,9 +2,9 @@ name: ci
 
 # Single source of truth: run the same pre-commit hooks CI and locally.
 # Hooks: shellcheck + hadolint + ruff (lint), broker pytest + runner-loop SELFTEST
-# (light/supabase/ios, + bash -n on self-update.sh) + windows-ps (test), detect-private-key +
-# gitleaks (secret scan), plus YAML/whitespace hygiene. ubuntu-latest ships pwsh; PSScriptAnalyzer
-# is installed pinned before the gate runs. See .pre-commit-config.yaml.
+# (light/supabase/ios, + bash -n on self-update.sh) + windows-ps + runner-loop bats (test),
+# detect-private-key + gitleaks (secret scan), plus YAML/whitespace hygiene. ubuntu-latest ships
+# pwsh; PSScriptAnalyzer + bats are installed pinned before the gate runs. See .pre-commit-config.yaml.
 
 on:
   push:
@@ -30,5 +30,7 @@ jobs:
       - name: Install PSScriptAnalyzer (windows gate)
         shell: pwsh
         run: Install-Module PSScriptAnalyzer -RequiredVersion 1.25.0 -Force -Scope CurrentUser
+      - name: Install bats (pinned, matches local dev dep)
+        run: npm install -g bats@1.13.0
       - name: Run gate (lint + tests + secret scan)
         run: pre-commit run --all-files --show-diff-on-failure

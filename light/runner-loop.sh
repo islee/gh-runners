@@ -254,15 +254,11 @@ print(json.dumps({'name': name, 'labels': labels}))
 # run.sh --jitconfig. GitHub auto-cleans JIT runners post-job — no config.sh / --replace step.
 # Post-job bookkeeping and fleet-code self-update mirror the registration-token path.
 _jit_cycle() {
-  local _retry=0 _exp _backoff
+  local _retry=0 _backoff
   while true; do
     if _acquire_jitconfig; then break; fi
     _retry=$(( _retry + 1 ))
-    _exp=$(( _retry - 1 ))
-    (( _exp > 6 )) && _exp=6
-    _backoff=$(( REGISTRATION_RETRY_SECONDS * (2 ** _exp) ))
-    (( _backoff > 300 )) && _backoff=300
-    _backoff=$(( _backoff + (RANDOM % 15) ))
+    _backoff=$(( $(_compute_backoff "${_retry}") + (RANDOM % 15) ))
     warn "JIT config acquisition failed (attempt ${_retry}) — retrying in ${_backoff}s."
     sleep "${_backoff}"
   done
@@ -333,6 +329,27 @@ _prune_docker() {
   log "Post-job Docker prune: stopped containers + dangling images + build cache older than ${PRUNE_BUILDER_UNTIL:-48h}."
 }
 
+# ── Backoff computation — pure function, no jitter (testable) ─────────────────
+# Echoes REGISTRATION_RETRY_SECONDS * 2^(min(attempt-1,6)), capped at 300. The exponent cap
+# avoids integer overflow on a long outage; callers add a small random jitter on top to
+# decorrelate many hosts hitting the GitHub rate-limit at once (thundering herd).
+# WHY: extracted from the main loop and _jit_cycle to DRY the math and expose a
+# deterministic value that tests can assert the progression of without sleeping.
+_compute_backoff() {
+  local _att="${1:-1}" _exp _backoff
+  _exp=$(( _att - 1 ))
+  (( _exp > 6 )) && _exp=6
+  _backoff=$(( REGISTRATION_RETRY_SECONDS * (2 ** _exp) ))
+  (( _backoff > 300 )) && _backoff=300
+  echo "${_backoff}"
+}
+
+# ── Run only when executed directly (not sourced) ─────────────────────────────
+# WHY: sourcing defines all functions without running the main loop or SELFTEST
+# exit — required for bats isolation tests. Direct execution (systemd/SELFTEST)
+# sees BASH_SOURCE[0] == $0 and behaves exactly as before.
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+
 # ── SELFTEST exit point — after all function definitions, before main loop ─────
 if [[ "${_SELFTEST}" == "1" ]]; then
   type _acquire_reg_token   &>/dev/null || exit 1
@@ -341,6 +358,7 @@ if [[ "${_SELFTEST}" == "1" ]]; then
   type _prune_docker        &>/dev/null || exit 1
   type _acquire_jitconfig   &>/dev/null || exit 1
   type _jit_cycle           &>/dev/null || exit 1
+  type _compute_backoff     &>/dev/null || exit 1
   exit 0
 fi
 
@@ -361,11 +379,7 @@ while true; do
   log "Acquiring registration token..."
   if ! _acquire_reg_token; then
     RETRY_ATTEMPT=$(( RETRY_ATTEMPT + 1 ))
-    # Exponential backoff with jitter, capped at 300s. Jitter decorrelates many hosts hitting the
-    # GitHub rate-limit at once (thundering herd). Exponent capped to avoid overflow on long outages.
-    exp=$(( RETRY_ATTEMPT - 1 )); (( exp > 6 )) && exp=6
-    backoff=$(( REGISTRATION_RETRY_SECONDS * (2 ** exp) )); (( backoff > 300 )) && backoff=300
-    backoff=$(( backoff + (RANDOM % 15) ))
+    backoff=$(( $(_compute_backoff "${RETRY_ATTEMPT}") + (RANDOM % 15) ))
     warn "Token acquisition failed (attempt ${RETRY_ATTEMPT}) — retrying in ${backoff}s."
     sleep "${backoff}"; continue
   fi
@@ -442,3 +456,5 @@ except Exception:
     log "Re-registering for next job."
   fi
 done
+
+fi  # BASH_SOURCE guard

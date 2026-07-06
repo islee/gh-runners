@@ -4,6 +4,7 @@
 # Windows gate needs pwsh + PSScriptAnalyzer once:
 #   brew install powershell   (macOS) / see https://learn.microsoft.com/powershell/scripting/install
 #   pwsh -Command "Install-Module PSScriptAnalyzer -RequiredVersion 1.25.0 -Scope CurrentUser"
+# Bats (bats-core 1.13): brew install bats-core (macOS) | npm install -g bats@1.13.0
 # CI runs the same hooks (.github/workflows/ci.yml), so local == CI.
 #
 # Hooks summary:
@@ -13,6 +14,7 @@
 #   broker-pytest     — broker unit tests
 #   runner-selftest   — runner-loop.sh SELFTEST modes (light/supabase/ios) + bash -n on self-update.sh
 #   windows-ps        — PSScriptAnalyzer lint + runner-loop.ps1 SELFTEST (needs pwsh + PSScriptAnalyzer)
+#   runner-loop-bats  — light/runner-loop.sh behavioral tests (needs bats-core)
 #   trailing-whitespace / end-of-file-fixer / check-yaml / check-merge-conflict — hygiene
 #   detect-private-key / gitleaks — secret scan
 
@@ -74,4 +76,10 @@ repos:
         entry: bash windows/run-ps-checks.sh
         language: system             # needs: pwsh + PSScriptAnalyzer (see top comment)
         files: ^windows/.*\.(ps1|psd1|sh)$
+        pass_filenames: false
+      - id: runner-loop-bats
+        name: runner-loop behavioral tests (bats)
+        entry: bash tests/run-bats.sh
+        language: system             # needs: brew install bats-core | npm install -g bats@1.13.0
+        files: ^(light/runner-loop\.sh|tests/.*\.bats|tests/run-bats\.sh)$
         pass_filenames: false
