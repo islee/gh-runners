@@ -64,13 +64,15 @@ UPDATE_MIN_INTERVAL="300"
 # at runtime. We declare them here and install ahead of time.
 #   - DEFAULT_JOB_PACKAGES: hosted-runner baseline that setup-* actions shell out to —
 #     unzip (setup-deno/cmdline-tools), zip, xz-utils/zstd (actions/cache compression),
-#     lsb-release (setup-python OS detection), ca-certificates (TLS). Extend with --extra-packages.
+#     lsb-release (setup-python OS detection), ca-certificates (TLS), libatomic1 (libatomic.so.1 —
+#     required by setup-node's prebuilt node + many native node modules; present on hosted Ubuntu,
+#     absent on minimal Debian). Extend with --extra-packages.
 #     supabase-specific: postgresql-client (psql) — Postgres-stack jobs (e.g. plpgsql-check) need it
 #     and cannot self-install it (the runner user has no passwordless sudo).
 #   - TOOLCACHE_DIR: shared, persistent tool cache the runner is pointed at via AGENT_TOOLSDIRECTORY.
 #   - STAGE_PYTHON_VERSIONS: Python versions to pre-stage there (required for setup-python on
 #     non-Ubuntu hosts, which cannot download a prebuilt Python). Populate with --stage-python.
-readonly DEFAULT_JOB_PACKAGES="unzip zip xz-utils zstd lsb-release ca-certificates postgresql-client"
+readonly DEFAULT_JOB_PACKAGES="unzip zip xz-utils zstd lsb-release ca-certificates libatomic1 postgresql-client"
 readonly DEFAULT_TOOLCACHE_DIR="/opt/hostedtoolcache"
 JOB_PACKAGES="${JOB_PACKAGES:-${DEFAULT_JOB_PACKAGES}}"
 EXTRA_PACKAGES=""

@@ -20,7 +20,7 @@ inbound ports).
 > **Job-runtime baseline (hosted-runner parity).** A bare host lacks tools that GitHub-hosted images
 > ship and that `setup-*` actions shell out to, so jobs fail mid-run (`Unable to locate executable
 > file: unzip` / `lsb_release`). `install.sh` therefore **installs a declared baseline ahead of
-> time** (`unzip zip xz-utils zstd lsb-release ca-certificates`; extend with `--extra-packages`) and
+> time** (`unzip zip xz-utils zstd lsb-release ca-certificates libatomic1`; extend with `--extra-packages`) and
 > points the runner at a shared tool cache via `AGENT_TOOLSDIRECTORY`. See
 > [Hosted-runner parity](#hosted-runner-parity).
 
@@ -73,7 +73,7 @@ light and supabase runners share a host), and enables `gh-runner-light@1 .. gh-r
 GitHub-hosted runners ship a large toolset and a pre-populated tool cache. A bare self-hosted host has
 neither, so `setup-*` actions fail at runtime. `install.sh` closes the gap **ahead of time**:
 
-- **OS baseline** — installs `unzip zip xz-utils zstd lsb-release ca-certificates` (extend with
+- **OS baseline** — installs `unzip zip xz-utils zstd lsb-release ca-certificates libatomic1` (extend with
   `--extra-packages`, opt out with `--skip-job-deps`). On non-apt distros it warns instead.
 - **Tool cache** — creates `--toolcache-dir` (default `/opt/hostedtoolcache`) and bakes
   `Environment=AGENT_TOOLSDIRECTORY=…` into the systemd unit. The runner derives `RUNNER_TOOL_CACHE`

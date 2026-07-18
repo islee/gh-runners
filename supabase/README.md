@@ -32,7 +32,7 @@ docker-in-docker networking trap:
 - One credential — see [Credentials](#credentials).
 
 > **Job-runtime baseline (hosted-runner parity).** Like `light`, `install.sh` installs a declared OS
-> baseline ahead of time (`unzip zip xz-utils zstd lsb-release ca-certificates`; extend with
+> baseline ahead of time (`unzip zip xz-utils zstd lsb-release ca-certificates libatomic1`; extend with
 > `--extra-packages`) and points the runner at a shared tool cache via `AGENT_TOOLSDIRECTORY`. On
 > **non-Ubuntu hosts** pass `--stage-python 3.13` (repeatable) so `actions/setup-python` resolves from
 > the cache — it cannot download a prebuilt Python there. See

@@ -15,12 +15,13 @@ FROM ${BASE_IMAGE}
 # Install the entrypoint's runtime deps (curl, jq) plus the hosted-runner job baseline the official
 # image lacks. The Ubuntu base already ships unzip/lsb_release/python3 (so setup-deno/setup-python
 # work — setup-python downloads a prebuilt Python, since the base IS Ubuntu, unlike the native Debian
-# host), but it is missing zip + the actions/cache compressors (xz-utils, zstd). Add them for parity.
+# host), but it is missing zip + the actions/cache compressors (xz-utils, zstd) + libatomic1
+# (libatomic.so.1, needed by setup-node's prebuilt node + native node modules). Add them for parity.
 # USER root for apt, then drop back to the unprivileged `runner` user the official image runs as.
 USER root
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-        curl jq ca-certificates zip xz-utils zstd && \
+        curl jq ca-certificates zip xz-utils zstd libatomic1 && \
     rm -rf /var/lib/apt/lists/*
 
 COPY bootstrap.sh /opt/bootstrap.sh
