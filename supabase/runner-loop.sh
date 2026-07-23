@@ -268,8 +268,14 @@ except Exception:
   log "Registering runner: ${RUNNER_NAME}"
 
   # --ephemeral: deregister after exactly one job. --replace: clear a stale same-name registration.
+  # --disableupdate: pin the actions/runner binary. CRITICAL — the runner's own auto-updater
+  # re-lays-out externals/ on a version bump and dereferences the node symlinks (node24/bin/npm →
+  # ../lib/node_modules/npm/bin/npm-cli.js becomes a flat 54-byte copy), which persists in the
+  # install dir and breaks every subsequent job's pnpm/action-setup. Bump the binary deliberately
+  # by re-running install.sh with a new RUNNER_VERSION instead. Matches every other variant
+  # (docker/android/windows already pass --disableupdate).
   if ! nice -n "${NICE_PRIORITY}" "${RUNNER_DIR}/config.sh" \
-      --unattended --ephemeral --replace \
+      --unattended --ephemeral --replace --disableupdate \
       --url "https://github.com/${GH_ORG}" \
       --token "${REG_TOKEN}" \
       --labels "${RUNNER_LABELS}" \

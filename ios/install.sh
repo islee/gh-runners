@@ -29,7 +29,7 @@ set -euo pipefail
 # GitHub enforces a MINIMUM runner version and rejects registration from older ones — a stale
 # pin here causes install to fail (2.316.1 was already rejected 2026-06). Bump periodically:
 # https://github.com/actions/runner/releases  (override per-run with --runner-version).
-readonly DEFAULT_RUNNER_VERSION="2.335.1"
+readonly DEFAULT_RUNNER_VERSION="2.336.0"
 # WHY: placeholder org — operators set this at install time via --org or GH_ORG env var.
 readonly DEFAULT_ORG="your-org"
 # 'android' is opt-in (Android-on-Mac requires SDK+AVD provisioning) — pass --labels to add it.

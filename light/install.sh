@@ -36,7 +36,7 @@ set -euo pipefail
 # ── Defaults ───────────────────────────────────────────────────────────────────
 # NOTE: GitHub enforces a MINIMUM runner version and rejects registration from older ones; bump this
 # periodically. Releases: https://github.com/actions/runner/releases (override with --runner-version).
-readonly DEFAULT_RUNNER_VERSION="2.335.1"
+readonly DEFAULT_RUNNER_VERSION="2.336.0"
 readonly DEFAULT_ORG="your-org"
 readonly DEFAULT_RUNNER_TYPE="light"   # <type> in gh-runner-<type>-<id>-<n>; override with --runner-type
 readonly DEFAULT_COUNT=2

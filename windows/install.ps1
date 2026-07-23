@@ -86,7 +86,7 @@ param(
     [string]$RunAsPassword = '',
     # NOTE: GitHub enforces a MINIMUM runner version and rejects registration from older ones; bump this
     # periodically. Releases: https://github.com/actions/runner/releases
-    [string]$RunnerVersion = '2.335.1'
+    [string]$RunnerVersion = '2.336.0'
 )
 
 Set-StrictMode -Version Latest
