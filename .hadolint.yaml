@@ -1,22 +1,5 @@
-# hadolint config for the runner Dockerfiles.
+# hadolint config for the Dockerfiles (images/light, rescuer).
 ignored:
-  # DL3066 — "non-numeric user-id may not be resolvable by host system". These images run as the official
-  # actions-runner image's named `runner` user, which exists inside the image; nothing maps it to a host uid.
-  # Appeared when the unpinned hadolint image picked up the rule (2026-10), not from a change here.
-  - DL3066
-  # DL3008 — "pin apt versions". Intentionally unpinned: these are templates, and the toolchain
-  # (Node/JDK/Android/Docker CLI) is meant to track distro/repo latest or be set via build args.
+  # DL3008 — "pin apt versions". Intentionally unpinned: the light image tracks distro latest and is
+  # itself pinned by image ID once built (see images/build-light.sh), so apt pins would add churn only.
   - DL3008
-  # DL4006 — "set pipefail before a RUN with a pipe". The piped installs here are simple and the
-  # default shell is acceptable for these images; not worth a global SHELL override.
-  - DL4006
-  # DL3006 — "always tag the base image". We use `FROM ${BASE_IMAGE}` with a tagged default ARG so
-  # the tag is overridable at build (--build-arg BASE_IMAGE=...:<digest>); hadolint can't see the
-  # ARG default and false-flags the variable FROM.
-  - DL3006
-  # SC1091 — embedded shellcheck "can't follow sourced file" for `. /etc/os-release` in a RUN; the
-  # file only exists at build time, not for the linter.
-  - SC1091
-  # DL3025 — "use JSON notation for CMD". broker/Dockerfile uses shell-form CMD on purpose so $PORT
-  # expands at runtime (the JSON exec form would treat ${PORT} literally).
-  - DL3025

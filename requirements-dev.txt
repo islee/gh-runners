@@ -1,0 +1,5 @@
+# Dev/CI-only deps for the gate (.pre-commit-config.yaml). The rescuer itself is stdlib-only.
+pytest>=9.1.1,<10
+# CRITICAL: keep this pinned to the SAME ruff as .pre-commit-config.yaml (ruff-pre-commit rev),
+# which is the authoritative formatter run by CI. Bump both together.
+ruff==0.6.9

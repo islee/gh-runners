@@ -12,8 +12,8 @@
 #   - hosted-runner labels (ubuntu-*, macos-*, windows-*) -- CRITICAL: a runner carrying one of
 #     these would silently absorb jobs meant for GitHub-hosted runners
 #   - `self-hosted` as the only label
-#   - any label not in ALLOWED_LABELS; an EMPTY ALLOWED_LABELS refuses everything (fail closed;
-#     the broker treats empty as "disabled", but this controller has no reason to run open)
+#   - any label not in ALLOWED_LABELS; an EMPTY ALLOWED_LABELS refuses everything (fail closed:
+#     this controller has no reason to run open)
 #
 # Dependencies: lib/gh-app.sh, curl, openssl, python3.
 
@@ -35,7 +35,7 @@ jit_label_ok() {
     ubuntu|ubuntu-*|macos|macos-*|windows|windows-*) echo "hosted-runner label refused: $lbl"; return 1 ;;
   esac
   [ -n "${ALLOWED_LABELS:-}" ] || { echo "ALLOWED_LABELS is empty (fail closed)"; return 1; }
-  # Tolerate commas and spaces as separators (mirrors the broker's strip behaviour).
+  # Tolerate commas and spaces as separators.
   for allowed in $(printf '%s' "$ALLOWED_LABELS" | tr ',' ' ' | tr '[:upper:]' '[:lower:]'); do
     [ "$allowed" = "$lower" ] && found=1
   done

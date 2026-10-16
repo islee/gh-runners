@@ -1,21 +1,14 @@
 # Pre-commit lint + test + secret gate. Install once:  pre-commit install
 # Run on demand:  pre-commit run --all-files
-# Broker tests need the dev deps once:  pip install -r broker/requirements-dev.txt
-# Windows gate needs pwsh + PSScriptAnalyzer once:
-#   brew install powershell   (macOS) / see https://learn.microsoft.com/powershell/scripting/install
-#   pwsh -Command "Install-Module PSScriptAnalyzer -RequiredVersion 1.25.0 -Scope CurrentUser"
+# Dev deps once:  pip install -r requirements-dev.txt
 # Bats (bats-core 1.13): brew install bats-core (macOS) | npm install -g bats@1.13.0
 # CI runs the same hooks (.github/workflows/ci.yml), so local == CI.
 #
 # Hooks summary:
 #   shellcheck        — shell script lint (warning+)
 #   hadolint          — Dockerfile lint
-#   ruff / ruff-format — broker Python lint + format
-#   broker-pytest     — broker unit tests
+#   ruff / ruff-format — rescuer Python lint + format
 #   rescuer-pytest    — rescuer/ stranded-run logic + JWT (offline, fake GitHub client)
-#   runner-selftest   — runner-loop.sh SELFTEST modes (light/supabase/ios) + bash -n on self-update.sh
-#   windows-ps        — PSScriptAnalyzer lint + runner-loop.ps1 SELFTEST (needs pwsh + PSScriptAnalyzer)
-#   runner-loop-bats  — light/runner-loop.sh behavioral tests (needs bats-core)
 #   slots-bats        — slots/ controller behavioral tests (JWT, label guard, launch, heartbeat; needs bats-core)
 #   trailing-whitespace / end-of-file-fixer / check-yaml / check-merge-conflict — hygiene
 #   detect-private-key / gitleaks — secret scan
@@ -53,43 +46,19 @@ repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.6.9
     hooks:
-      - id: ruff                      # broker + rescuer lint
-        files: ^(broker|rescuer)/.*\.py$
-      - id: ruff-format               # broker + rescuer format
-        files: ^(broker|rescuer)/.*\.py$
+      - id: ruff                      # rescuer lint
+        files: ^rescuer/.*\.py$
+      - id: ruff-format               # rescuer format
+        files: ^rescuer/.*\.py$
 
   # ── Test ─────────────────────────────────────────────────────────────────
   - repo: local
     hooks:
-      - id: broker-pytest
-        name: broker pytest
-        entry: bash -c 'cd broker && pytest -q'
-        language: system             # needs: pip install -r broker/requirements-dev.txt
-        files: ^broker/
-        pass_filenames: false
       - id: rescuer-pytest
         name: rescuer pytest
         entry: python3 -m pytest -q rescuer/tests
-        language: system             # needs: pytest (broker dev deps) + openssl
+        language: system             # needs: pip install -r requirements-dev.txt + openssl
         files: ^rescuer/
-        pass_filenames: false
-      - id: runner-selftest
-        name: runner-loop SELFTEST (light/supabase/ios)
-        entry: bash tests/run-selftests.sh
-        language: system
-        files: ^(light|supabase|ios)/(runner-loop|self-update)\.sh$
-        pass_filenames: false
-      - id: windows-ps
-        name: windows PowerShell lint + selftest (pwsh + PSScriptAnalyzer)
-        entry: bash windows/run-ps-checks.sh
-        language: system             # needs: pwsh + PSScriptAnalyzer (see top comment)
-        files: ^windows/.*\.(ps1|psd1|sh)$
-        pass_filenames: false
-      - id: runner-loop-bats
-        name: runner-loop behavioral tests (bats)
-        entry: bash tests/run-bats.sh
-        language: system             # needs: brew install bats-core | npm install -g bats@1.13.0
-        files: ^(light/runner-loop\.sh|tests/.*\.bats|tests/run-bats\.sh)$
         pass_filenames: false
       - id: slots-bats
         name: slots behavioral tests (bats)
