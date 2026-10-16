@@ -52,11 +52,14 @@ launch_validate_args() {
   [ "$n" -le "${LIGHT_SLOTS:-$LIGHT_MAX}" ] || { echo "launch: slot beyond configured LIGHT_SLOTS" >&2; return 1; }
 }
 
-# The image must be pinned by digest: a mutable tag would let a registry change swap the code
-# that runs with the JIT credential.
+# The image must be immutable: either repo@sha256:<digest> or a bare LOCAL image ID
+# (sha256:<64 hex>, as printed by images/build-light.sh). A mutable tag would let an upstream push
+# change the code that runs with the JIT credential.
 launch_validate_image() {
+  local img=${1:-}
+  [[ "$img" =~ ^sha256:[0-9a-f]{64}$ ]] && return 0
   # WHY leading [a-z0-9]: a leading "-" would be parsed by docker run as an option (--privileged@...).
-  [[ "${1:-}" =~ ^[a-z0-9][a-z0-9./_-]*(:[A-Za-z0-9._-]+)?@sha256:[0-9a-f]{64}$ ]]
+  [[ "$img" =~ ^[a-z0-9][a-z0-9./_-]*(:[A-Za-z0-9._-]+)?@sha256:[0-9a-f]{64}$ ]]
 }
 
 # launch_preflight — exit 0 iff the pool guest CANNOT reach the LAN probe target.
