@@ -135,3 +135,22 @@ PY
     refute grep -nE '^\s*set -[a-z]*x|set -o xtrace|bash -x' "$f"
   done
 }
+
+@test "BSD seq (counts down when first > last) must not remove the top slot at LIGHT_SLOTS=MAX" {
+  # Regression (2026-10-16, real mini): `seq 7 6` on macOS yields "7 6", so the "remove slots beyond
+  # the configured count" loop deleted light-6 right after installing it. GNU seq hid it in CI.
+  mkdir -p "$W/bin" "$W/daemons"
+  cat > "$W/bin/seq" <<'SH'
+#!/bin/bash
+# BSD-style seq: counts down when FIRST > LAST
+a=$1; b=$2
+if [ "$a" -le "$b" ]; then i=$a; while [ "$i" -le "$b" ]; do echo "$i"; i=$((i + 1)); done
+else i=$a; while [ "$i" -ge "$b" ]; do echo "$i"; i=$((i - 1)); done; fi
+SH
+  chmod +x "$W/bin/seq"
+  touch "$W/daemons/dev.ghr.slot.light-6.plist"
+  PATH="$W/bin:$PATH" run bash "$SLOTS_DIR/install.sh" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"launchctl bootstrap system $W/daemons/dev.ghr.slot.light-6.plist"* ]]
+  refute grep -q -F "rm -f $W/daemons/dev.ghr.slot.light-6.plist" <<< "$output"
+}

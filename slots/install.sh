@@ -248,8 +248,11 @@ bootstrap_daemon() {
 install_daemons() {
   local n count plist tmp ctl_home state_home ghr_home
   count=$(slot_count)
-  ctl_home=$(user_home "$CTL_USER")
-  state_home=$(user_home "$STATE_USER")
+  # WHY not user_home: macOS ignores -home for role accounts and records /var/empty (read-only), seen
+  # on macOS 27 (2026-10-16: "Home argument is ignored for role accounts"). The daemons' HOME must be
+  # the 0700 dirs created above, or the token cache can't be written.
+  ctl_home="/var/db/$CTL_USER"
+  state_home="/var/db/$STATE_USER"
   ghr_home=$(user_home ghr)
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/ghr-plists.XXXXXX")
   for n in $(seq 1 "$count"); do
@@ -269,11 +272,15 @@ install_daemons() {
   bootstrap_daemon dev.ghr.pool "$DAEMON_DIR/dev.ghr.pool.plist"
   rm -rf "$tmp"
   # Slots beyond the configured count (LIGHT_SLOTS lowered) must not keep running.
-  for n in $(seq "$((count + 1))" "$MAX_SLOTS"); do
+  # CRITICAL: no `seq "$((count + 1))" "$MAX_SLOTS"` here. BSD seq (macOS) counts DOWN when first > last,
+  # so at count == MAX_SLOTS it yields "7 6" and removed the slot just installed (2026-10-16, light-6).
+  n=$((count + 1))
+  while [ "$n" -le "$MAX_SLOTS" ]; do
     if [ -e "$DAEMON_DIR/dev.ghr.slot.light-$n.plist" ]; then
       run launchctl bootout "system/dev.ghr.slot.light-$n" 2> /dev/null || true
       run rm -f "$DAEMON_DIR/dev.ghr.slot.light-$n.plist"
     fi
+    n=$((n + 1))
   done
 }
 
