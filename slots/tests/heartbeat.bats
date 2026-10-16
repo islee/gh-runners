@@ -51,6 +51,18 @@ compute() { compute_state "$W/state" "${1:-$NOW}" "$RUNNERS" "$HB"; }
   [ "$(compute)" = "ok" ]
 }
 
+@test "down: a ts or since in the FUTURE by > 5 s (clock jump / forged file); 5 s of skew is tolerated" {
+  healthy_slots
+  slot 2 idle -6 5000
+  [ "$(compute)" = "down" ]
+  slot 2 idle -5 5000
+  [ "$(compute)" = "ok" ]
+  slot 2 idle 5 -6
+  [ "$(compute)" = "down" ]
+  slot 2 idle -3600 5000
+  [ "$(compute)" = "down" ]
+}
+
 @test "down: unparseable state file" {
   healthy_slots
   echo 'garbage' > "$W/state/light-1.json"
@@ -60,10 +72,12 @@ compute() { compute_state "$W/state" "${1:-$NOW}" "$RUNNERS" "$HB"; }
 @test "down: slot stuck registered > STUCK_SECS while its runner is not online" {
   healthy_slots
   printf '1\tghr-light-1\tonline\tfalse\n3\tghr-light-3\tonline\tfalse\n' > "$RUNNERS"   # slot 2 absent
-  slot 2 registered 5 181
+  slot 2 registered 5 121
   [ "$(compute)" = "down" ]
   # same slot but only 60 s into registered (VM/docker still starting): not stuck yet
   slot 2 registered 5 60
+  [ "$(compute)" = "ok" ]
+  slot 2 registered 5 120    # boundary: STUCK_SECS default is 120
   [ "$(compute)" = "ok" ]
 }
 
@@ -102,14 +116,27 @@ compute() { compute_state "$W/state" "${1:-$NOW}" "$RUNNERS" "$HB"; }
 }
 
 @test "tripwire: foreign / malformed names flagged, fleet names pass" {
+  SUPABASE_SLOTS=12
   out=$(printf '%s\n' \
-    "$(printf '1\tghr-light-1\toffline\tfalse')" \
-    "$(printf '2\tghr-supabase-12\tonline\tfalse')" \
+    "$(printf '1\tghr-light-1\toffline\tfalse\tghr-light')" \
+    "$(printf '2\tghr-supabase-12\tonline\tfalse\tghr-supabase')" \
     "$(printf '3\tgh-runner-light-host-1\tonline\tfalse')" \
     "$(printf '4\tghr-light-1x\tonline\tfalse')" \
     "$(printf '5\tghr-android-1\tonline\tfalse')" \
     "$(printf '6\tmallory\tonline\tfalse')" | tripwire_names)
   [ "$out" = "$(printf 'gh-runner-light-host-1\nghr-light-1x\nghr-android-1\nmallory')" ]
+}
+
+@test "tripwire: slot number beyond the configured count / zero, and wrong custom labels" {
+  out=$(printf '%s\n' \
+    "$(printf '1\tghr-light-3\tonline\tfalse\tghr-light')" \
+    "$(printf '2\tghr-light-4\tonline\tfalse\tghr-light')" \
+    "$(printf '3\tghr-light-0\tonline\tfalse\tghr-light')" \
+    "$(printf '4\tghr-light-99999999999\tonline\tfalse\tghr-light')" \
+    "$(printf '5\tghr-light-1\tonline\tfalse\tghr-light,extra')" \
+    "$(printf '6\tghr-light-2\tonline\tfalse\t')" \
+    "$(printf '7\tghr-supabase-1\tonline\tfalse\tghr-supabase')" | tripwire_names)
+  [ "$out" = "$(printf 'ghr-light-4\nghr-light-0\nghr-light-99999999999\nghr-light-1\nghr-light-2\nghr-supabase-1')" ]
 }
 
 @test "variable write: PATCH on the repo; POST to create when PATCH 404s" {
@@ -141,9 +168,29 @@ compute() { compute_state "$W/state" "${1:-$NOW}" "$RUNNERS" "$HB"; }
   run bash "$SLOTS_DIR/heartbeat.sh"
   [ "$status" -eq 0 ]
   [[ "$output" == *"TRIPWIRE"*"intruder"* ]]
-  grep -Eq 'BODY \{"name":"SELF_HOSTED_STATE","value":"ok@[0-9]+"\}' "$CURL_LOG"
+  # the foreign runner latches the tripwire in this very run, so the published state is down
+  grep -Eq 'BODY \{"name":"SELF_HOSTED_STATE","value":"down@[0-9]+"\}' "$CURL_LOG"
   [ "$(grep -c 'CALL PATCH' "$CURL_LOG")" -eq 2 ]
   grep -q intruder "$GHR_HB_ROOT/tripwire"
+}
+
+@test "end to end: while the tripwire file exists the published state is down, even with healthy slots" {
+  route_token
+  now=$(date -u +%s)
+  for n in 1 2 3; do
+    printf '{"slot":"light-%s","class":"light","n":%s,"state":"idle","ts":%s,"since":%s,"last_exit":0}\n' "$n" "$n" "$now" "$now" > "$W/state/light-$n.json"
+  done
+  route GET /orgs/test-org/actions/runners 200 '{"runners":[{"id":1,"name":"ghr-light-1","status":"online","busy":false,"labels":[{"name":"ghr-light","type":"custom"}]}]}'
+  route PATCH /repos/test-org/repo-a/actions/variables/SELF_HOSTED_STATE 204 ''
+  route PATCH /repos/test-org/repo-b/actions/variables/SELF_HOSTED_STATE 204 ''
+  echo latched > "$GHR_HB_ROOT/tripwire"
+  run bash "$SLOTS_DIR/heartbeat.sh"
+  [ "$status" -eq 0 ]
+  grep -Eq 'BODY \{"name":"SELF_HOSTED_STATE","value":"down@[0-9]+"\}' "$CURL_LOG"
+  rm "$GHR_HB_ROOT/tripwire"
+  : > "$CURL_LOG"
+  run bash "$SLOTS_DIR/heartbeat.sh"
+  grep -Eq 'value":"ok@' "$CURL_LOG"
 }
 
 @test "end to end: a clean org writes no tripwire file; a runner-list failure publishes nothing" {
@@ -152,7 +199,7 @@ compute() { compute_state "$W/state" "${1:-$NOW}" "$RUNNERS" "$HB"; }
   for n in 1 2 3; do
     printf '{"slot":"light-%s","class":"light","n":%s,"state":"idle","ts":%s,"since":%s,"last_exit":0}\n' "$n" "$n" "$now" "$now" > "$W/state/light-$n.json"
   done
-  route GET /orgs/test-org/actions/runners 200 '{"runners":[{"id":1,"name":"ghr-light-1","status":"online","busy":false}]}'
+  route GET /orgs/test-org/actions/runners 200 '{"runners":[{"id":1,"name":"ghr-light-1","status":"online","busy":false,"labels":[{"name":"ghr-light","type":"custom"}]}]}'
   route PATCH /repos/test-org/repo-a/actions/variables/SELF_HOSTED_STATE 204 ''
   route PATCH /repos/test-org/repo-b/actions/variables/SELF_HOSTED_STATE 204 ''
   run bash "$SLOTS_DIR/heartbeat.sh"

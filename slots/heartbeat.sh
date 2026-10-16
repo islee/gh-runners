@@ -14,8 +14,10 @@
 # WHY "stuck" uses GitHub runner status, not the job queue: the state App has no Actions:read, so
 # queued jobs are invisible. A slot sitting in idle-prep/registered/backoff for > STUCK_SECS
 # whose runner is not `online` on GitHub is wedged either way, and that is observable.
-# Tripwire: any org runner whose name is not ghr-(light|supabase)-<n> is logged as TRIPWIRE and
-# latched into $GHR_HB_ROOT/tripwire (operator clears it by deleting the file).
+# Tripwire: any org runner with a foreign name, a slot number beyond the configured count, or
+# labels differing from the class label is logged as TRIPWIRE and latched into
+# $GHR_HB_ROOT/tripwire; while latched the published state is `down` (operator deletes the file).
+# NOTE: `ok` cannot see the job queue (state App has no Actions:read); the org-side rescuer covers it.
 #
 # Dependencies: lib/gh-app.sh. Uses the STATE App (never the runner App).
 
@@ -28,7 +30,10 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GHR_STATE_DIR="${GHR_STATE_DIR:-/var/db/ghr/slots}"
 GHR_HB_ROOT="${GHR_HB_ROOT:-/var/db/ghr}"
 STALE_SECS="${STALE_SECS:-120}"
-STUCK_SECS="${STUCK_SECS:-180}"
+# 120 s so a wedged slot is flagged within 3 min even counting the 60 s heartbeat interval.
+STUCK_SECS="${STUCK_SECS:-120}"
+# Tolerated clock skew between a slot file and this process.
+FUTURE_SECS="${FUTURE_SECS:-5}"
 SATURATED_SECS="${SATURATED_SECS:-60}"
 STATE_VAR_NAME="${STATE_VAR_NAME:-SELF_HOSTED_STATE}"
 
@@ -57,9 +62,12 @@ compute_state() {
       st=$(state_field_str "$f" state)
       [ -n "$ts" ] && [ -n "$since" ] && [ -n "$st" ] || { echo down; return 0; }
       [ "$((now - ts))" -le "$STALE_SECS" ] || { echo down; return 0; }
+      # A timestamp from the future (clock jump, or a forged/garbled file) must not look fresh.
+      [ "$((ts - now))" -le "$FUTURE_SECS" ] && [ "$((since - now))" -le "$FUTURE_SECS" ] || { echo down; return 0; }
       name="ghr-$class-$n"
-      status=$(awk -F'\t' -v nm="$name" '$2 == nm { print $3; exit }' "$runners")
-      busy=$(awk -F'\t' -v nm="$name" '$2 == nm { print $4; exit }' "$runners")
+      # NOTE: no awk `exit` (would SIGPIPE a producer under pipefail); first match wins via flag.
+      status=$(awk -F'\t' -v nm="$name" '$2 == nm && !f { print $3; f = 1 }' "$runners")
+      busy=$(awk -F'\t' -v nm="$name" '$2 == nm && !f { print $4; f = 1 }' "$runners")
       case "$st" in
         idle-prep | registered | backoff)
           age=$((now - since))
@@ -83,12 +91,38 @@ compute_state() {
   echo ok
 }
 
-# tripwire_names < tsv — print names of runners NOT matching the fleet naming convention.
+# norm_labels STRING — comma/space separated labels -> lowercase, sorted, unique, comma-joined.
+norm_labels() {
+  printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr ', ' '\n\n' | grep -v '^$' | sort -u | paste -sd, -
+}
+
+# expected_labels CLASS — the label set a runner of CLASS must carry, normalised.
+expected_labels() {
+  case "$1" in
+    light) norm_labels "${LIGHT_LABELS:-ghr-light}" ;;
+    supabase) norm_labels "${SUPABASE_LABELS:-ghr-supabase}" ;;
+  esac
+}
+
+# tripwire_names < tsv — print names of runners that do not belong to this fleet:
+#   - name not matching ghr-(light|supabase)-<n>
+#   - <n> outside 1..<configured slot count> for its class (LIGHT_SLOTS / SUPABASE_SLOTS)
+#   - custom labels different from the configured label set for its class
+# WHY: a foreign or copied runner in the org can steal jobs meant for the pool.
 tripwire_names() {
-  local id name rest
-  while IFS=$'\t' read -r id name rest; do
+  local id name status busy labels class num count want
+  while IFS=$'\t' read -r id name status busy labels; do
     [ -n "$id$name" ] || continue
-    ghr_valid_runner_name "$name" || printf '%s\n' "$name"
+    ghr_valid_runner_name "$name" || { printf '%s\n' "$name"; continue; }
+    class=${name#ghr-}; class=${class%%-*}
+    num=${name##*-}
+    case $class in light) count=${LIGHT_SLOTS:-0} ;; supabase) count=${SUPABASE_SLOTS:-0} ;; *) count=0 ;; esac
+    # >6 digits cannot be a real slot number (and would overflow shell arithmetic)
+    if [ "${#num}" -gt 6 ] || [ "$((10#$num))" -lt 1 ] || [ "$((10#$num))" -gt "$count" ]; then
+      printf '%s\n' "$name"; continue
+    fi
+    want=$(expected_labels "$class")
+    [ "$labels" = "$want" ] || printf '%s\n' "$name"
   done
 }
 
@@ -121,6 +155,8 @@ main() {
     { date -u +%Y-%m-%dT%H:%M:%SZ; printf '%s\n' "$bad"; } > "$GHR_HB_ROOT/tripwire" 2> /dev/null \
       || ghr_log "WARN cannot write tripwire file"
   fi
+  # Latched: while the tripwire file exists the pool is not trusted, whatever the slots say.
+  if [ -e "$GHR_HB_ROOT/tripwire" ]; then state=down; ghr_log "tripwire latched: publishing down"; fi
   for repo in ${CONSUMER_REPOS//,/ }; do
     [[ "$repo" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] || { ghr_log "WARN skipping invalid repo: $repo"; rc=1; continue; }
     write_state_var "$repo" "${state}@${now}" || { ghr_log "ERROR variable write failed: $repo"; rc=1; }
