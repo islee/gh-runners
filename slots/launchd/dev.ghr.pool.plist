@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Template for dev.ghr.pool: brings the Lima pool VM up at boot as the VM-owning `ghr` user.
+  install.sh substitutes @LIBEXEC@ @GHR_HOME@ @LOGDIR@.
+  WHY AbandonProcessGroup: `limactl start` leaves a long-lived host agent; without this launchd
+  kills it (and so the VM) as soon as `pool ensure` exits.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>dev.ghr.pool</string>
+  <key>UserName</key>
+  <string>ghr</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>@LIBEXEC@/pool</string>
+    <string>ensure</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin</string>
+    <key>HOME</key>
+    <string>@GHR_HOME@</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>AbandonProcessGroup</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>@LOGDIR@/pool.log</string>
+  <key>StandardErrorPath</key>
+  <string>@LOGDIR@/pool.log</string>
+</dict>
+</plist>

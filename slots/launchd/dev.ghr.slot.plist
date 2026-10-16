@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Template for dev.ghr.slot.<class>-<n>: one LaunchDaemon per runner slot. install.sh substitutes
+  @CLASS@ @N@ @LIBEXEC@ @CTL_HOME@ @LOGDIR@ and writes one plist per slot.
+  WHY AbandonProcessGroup: the loop spawns sudo/limactl children (and limactl may fork a
+  long-lived VM host agent); without it launchd kills the whole group when the job exits.
+  WHY ExitTimeOut 21700: SIGTERM means "finish the current job" (6 h max) before SIGKILL.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>dev.ghr.slot.@CLASS@-@N@</string>
+  <key>UserName</key>
+  <string>_ghrctl</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>@LIBEXEC@/slot-loop</string>
+    <string>@CLASS@</string>
+    <string>@N@</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin</string>
+    <key>HOME</key>
+    <string>@CTL_HOME@</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>30</integer>
+  <key>ExitTimeOut</key>
+  <integer>21700</integer>
+  <key>AbandonProcessGroup</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>@LOGDIR@/slot-@CLASS@-@N@.log</string>
+  <key>StandardErrorPath</key>
+  <string>@LOGDIR@/slot-@CLASS@-@N@.log</string>
+</dict>
+</plist>

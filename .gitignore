@@ -35,3 +35,6 @@ __pycache__/
 
 # Local dev worktrees (dev-loop)
 /.worktrees/
+
+# Config templates are committed even though *.env is ignored.
+!config.example.env
