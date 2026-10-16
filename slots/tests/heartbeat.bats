@@ -1,4 +1,5 @@
 #!/usr/bin/env bats
+# shellcheck disable=SC2034  # globals consumed by the sourced script under test
 # Tests for slots/heartbeat.sh: ok/saturated/down computation from fixture state files, the
 # foreign-runner tripwire, and the repo-variable write path (PATCH, POST on 404). Offline.
 
