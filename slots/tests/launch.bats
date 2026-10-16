@@ -47,6 +47,13 @@ launch() { printf '%s\n' "$JIT_BLOB" | bash "$SLOTS_DIR/launch.sh" "$@"; }
   grep -q 'read -r J; exec ./run.sh --jitconfig "\$J"' "$LIMA_LOG"
 }
 
+@test "the JIT is in no limactl call's environment (light path)" {
+  run launch light 1
+  [ "$status" -eq 0 ]
+  [ -s "$LIMA_ENV" ]
+  refute grep -q "$JIT_BLOB" "$LIMA_ENV"
+}
+
 @test "the runner's exit code is propagated" {
   FAKE_RUN_RC=7 run launch light 1
   [ "$status" -eq 7 ]

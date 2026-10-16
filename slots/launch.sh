@@ -31,8 +31,11 @@ export PATH
 # only the repo/test copy (0) honours the override variables below.
 GHR_INSTALLED=0
 if [ "$GHR_INSTALLED" = 1 ]; then
+  # Caller overrides AND config-owned settings: the root-owned config file is the only source.
   unset LIMA_HOME BASH_ENV ENV CDPATH GHR_CONFIG LIMACTL POOL_INSTANCE POOL_GOLDEN \
-    JOB_TIMEOUT_SECS SUPA_GOLDEN GHR_POOL_LOCK POOL_LOCK_WAIT TMPDIR GH_API_BASE
+    JOB_TIMEOUT_SECS SUPA_GOLDEN SUPA_DESTROY_TIMEOUT GHR_POOL_LOCK POOL_LOCK_WAIT TMPDIR GH_API_BASE \
+    ORG RUNNER_GROUP_ID LIGHT_SLOTS LIGHT_LABELS LIGHT_IMAGE ALLOWED_LABELS LAN_PROBE \
+    SUPABASE_SLOTS SUPABASE_LABELS SUPA_MEM SUPA_CPUS
 fi
 
 set -uo pipefail
@@ -46,6 +49,8 @@ POOL_INSTANCE="${POOL_INSTANCE:-ghr-pool}"
 LIGHT_MAX=6
 SUPA_MAX=3
 SUPA_GOLDEN="${SUPA_GOLDEN:-ghr-supa-golden}"
+# Upper bound for each stop/delete/list of a per-job VM; a hung limactl must not hang the slot.
+SUPA_DESTROY_TIMEOUT="${SUPA_DESTROY_TIMEOUT:-120}"
 # 6 h = GitHub's maximum job time; anything longer is a wedge.
 JOB_TIMEOUT_SECS="${JOB_TIMEOUT_SECS:-21600}"
 
@@ -147,11 +152,60 @@ launch_run() {
 
 # ── supabase class: one throwaway VM per job ──────────────────────────────────
 
-# supa_destroy VM — stop + delete, tolerating "already gone". Never touches the golden: callers
-# only ever pass the per-slot name, and supa_run refuses anything else.
+# run_bounded SECS CMD... — run CMD, kill it if it outlives SECS (no host `timeout` on macOS).
+# Returns CMD's status, or 143/137 when the bound fired.
+run_bounded() {
+  local secs=$1 pid wd rc=0
+  shift
+  "$@" &
+  pid=$!
+  ( sleep "$secs" & sp=$!
+    trap 'kill "$sp" 2> /dev/null; exit 0' TERM
+    wait "$sp"
+    kill -TERM "$pid" 2> /dev/null
+    sleep 1
+    kill -KILL "$pid" 2> /dev/null ) &
+  wd=$!
+  wait "$pid" || rc=$?
+  kill "$wd" 2> /dev/null
+  wait "$wd" 2> /dev/null || true
+  return "$rc"
+}
+
+# supa_destroy VM — stop + delete (bounded), then VERIFY the VM is gone via `limactl list`.
+# Returns 1 and logs a loud LEAK error if it is not. Never touches the golden: callers only ever
+# pass per-slot names, and the golden name is refused here too.
 supa_destroy() {
-  "$LIMACTL" stop -f "$1" < /dev/null > /dev/null 2>&1 || true
-  "$LIMACTL" delete -f "$1" < /dev/null > /dev/null 2>&1 || true
+  local vm=$1 attempt status=""
+  [ "$vm" != "$SUPA_GOLDEN" ] || { ghr_log "ERROR refusing to destroy the golden"; return 1; }
+  for attempt in 1 2; do
+    run_bounded "$SUPA_DESTROY_TIMEOUT" "$LIMACTL" stop -f "$vm" < /dev/null > /dev/null 2>&1 \
+      || ghr_log "WARN limactl stop -f $vm failed or timed out (attempt $attempt)"
+    run_bounded "$SUPA_DESTROY_TIMEOUT" "$LIMACTL" delete -f "$vm" < /dev/null > /dev/null 2>&1 \
+      || ghr_log "WARN limactl delete -f $vm failed or timed out (attempt $attempt)"
+    status=$("$LIMACTL" list "$vm" --format '{{.Status}}' < /dev/null 2> /dev/null || true)
+    [ -z "$status" ] && return 0
+  done
+  ghr_log "ERROR LEAK: VM $vm still present ($status) after cleanup"
+  return 1
+}
+
+# supa_sweep — delete ghr-supa-* VMs that do not correspond to a configured slot (crashed runs,
+# a lowered SUPABASE_SLOTS, hand-made strays). Configured slots may be mid-job on another slot loop,
+# so they are never touched; the golden never is either.
+supa_sweep() {
+  local names name n keep
+  names=$(run_bounded "$SUPA_DESTROY_TIMEOUT" "$LIMACTL" list --format '{{.Name}}' < /dev/null 2> /dev/null || true)
+  for name in $names; do
+    case "$name" in ghr-supa-*) ;; *) continue ;; esac
+    [ "$name" != "$SUPA_GOLDEN" ] || continue
+    keep=0
+    if [[ "$name" =~ ^ghr-supa-([1-9][0-9]*)$ ]]; then
+      n=${BASH_REMATCH[1]}
+      [ "$n" -le "${SUPABASE_SLOTS:-0}" ] && [ "$n" -le "$SUPA_MAX" ] && keep=1
+    fi
+    [ "$keep" -eq 1 ] || { ghr_log "supabase: sweeping orphan VM $name"; supa_destroy "$name" || true; }
+  done
 }
 
 # supa_run N JIT — clone the golden, boot, preflight, run the runner natively, always delete.
@@ -162,9 +216,13 @@ supa_run() {
   # "fix" it by stopping or starting it -- that is the build script's job.
   status=$("$LIMACTL" list "$SUPA_GOLDEN" --format '{{.Status}}' < /dev/null 2> /dev/null || true)
   [ "$status" = "Stopped" ] || { ghr_log "supabase: golden $SUPA_GOLDEN is '${status:-missing}', need Stopped"; return 1; }
+  supa_sweep
   # Leftover from a crashed run (same slot, same name) must go before we clone over it.
   status=$("$LIMACTL" list "$vm" --format '{{.Status}}' < /dev/null 2> /dev/null || true)
-  [ -z "$status" ] || { ghr_log "supabase: removing leftover $vm ($status)"; supa_destroy "$vm"; }
+  if [ -n "$status" ]; then
+    ghr_log "supabase: removing leftover $vm ($status)"
+    supa_destroy "$vm" || return 1
+  fi
   # From here on the VM must not outlive this call, whatever happens.
   SUPA_VM=$vm
   "$LIMACTL" clone "$SUPA_GOLDEN" "$vm" --tty=false --set ".cpus = ${SUPA_CPUS} | .memory = \"${SUPA_MEM}\"" < /dev/null > /dev/null \
@@ -180,8 +238,9 @@ supa_run() {
   run_watched "$jit" "$LIMACTL" shell "$vm" -- sudo -u runner -H env \
     AGENT_TOOLSDIRECTORY=/opt/hostedtoolcache RUNNER_TOOL_CACHE=/opt/hostedtoolcache \
     bash -c 'cd /opt/actions-runner && read -r J && exec ./run.sh --jitconfig "$J"' || rc=$?
-  supa_destroy "$vm"
-  SUPA_VM=""
+  # A leaked VM is a failure even when the job passed: surface it so the slot backs off and the
+  # next job's sweep retries.
+  if supa_destroy "$vm"; then SUPA_VM=""; elif [ "$rc" -eq 0 ]; then rc=1; fi
   return "$rc"
 }
 
