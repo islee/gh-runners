@@ -92,9 +92,13 @@ setup() {
   refute ghr_valid_runner_name "gh-runner-light-host-1"
 }
 
-@test "runners TSV: 5th column = custom labels, lowercased and sorted; read-only system labels ignored" {
-  out=$(printf '%s' '{"runners":[{"id":1,"name":"ghr-light-1","status":"online","busy":false,"labels":[{"name":"self-hosted","type":"read-only"},{"name":"macOS","type":"read-only"},{"name":"B-Label","type":"custom"},{"name":"ghr-light","type":"custom"}]}]}' | gh_runners_tsv_from_json)
-  [ "$(printf '%s' "$out" | cut -f5)" = "b-label,ghr-light" ]
+@test "runners TSV: 5th column = ALL labels (JIT labels come back type read-only), lowercased and sorted" {
+  # Real API shape for a JIT runner (2026-10-16): its only label, type "read-only", id 0.
+  out=$(printf '%s' '{"runners":[{"id":1,"name":"ghr-light-1","status":"online","busy":false,"labels":[{"id":0,"name":"ghr-light","type":"read-only"}]}]}' | gh_runners_tsv_from_json)
+  [ "$out" = "$(printf '1\tghr-light-1\tonline\tfalse\tghr-light')" ]
+  # A token-registered runner also carries system labels -> they are kept, so the tripwire sees a mismatch.
+  out=$(printf '%s' '{"runners":[{"id":2,"name":"ghr-light-2","status":"online","busy":false,"labels":[{"name":"self-hosted","type":"read-only"},{"name":"macOS","type":"read-only"},{"name":"ghr-light","type":"custom"}]}]}' | gh_runners_tsv_from_json)
+  [ "$out" = "$(printf '2\tghr-light-2\tonline\tfalse\tghr-light,macos,self-hosted')" ]
 }
 
 @test "token cache: gh_app_init refuses when HOME is unset/empty/relative (no /tmp fallback)" {

@@ -90,8 +90,11 @@ def clean(v):
     return v
 d = json.load(sys.stdin)
 for r in d.get("runners", []):
-    labels = sorted({clean(l.get("name", "")).lower() for l in r.get("labels", [])
-                     if l.get("type", "custom") != "read-only"})
+    # ALL labels, whatever their type: GitHub reports the labels of a JIT runner as
+    # {"id": 0, "type": "read-only"} (seen 2026-10-16), so filtering read-only emptied them.
+    # The fleet is JIT-only and JIT runners carry no system labels, so any extra label
+    # (self-hosted/os/arch from a token-registered runner) must count as a mismatch.
+    labels = sorted({clean(l.get("name", "")).lower() for l in r.get("labels", [])})
     print("%s\t%s\t%s\t%s\t%s" % (r.get("id", ""), clean(r.get("name", "")), r.get("status", ""),
                                   "true" if r.get("busy") else "false", ",".join(labels)))
 '
