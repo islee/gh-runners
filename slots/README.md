@@ -68,11 +68,25 @@ Operator clears a tripwire by deleting `/var/db/ghr/tripwire` after removing the
 4. `*.env` is gitignored; `config.example.env` is re-included explicitly in `.gitignore`.
 5. Org variables do not reach private repos on GitHub Free, so the heartbeat writes a repo-level
    variable per consumer repo.
-6. A first SIGTERM to an idle slot waits for its (not yet started) job; send a second signal to
-   force-exit. The plist's `ExitTimeOut` is 21700 s to match the 6 h job limit.
-7. "Stuck" detection uses GitHub runner status, not the job queue: the state App has no
-   `Actions: read`. A slot in idle-prep/registered/backoff for over 180 s whose runner is not
-   `online` marks the whole pool `down`.
+6. SIGTERM semantics: TERMINATING is checked before reconcile, mint and launch. If the slot's
+   runner is minted but not busy it is deleted (`reconcile.sh --release`) and the launch is
+   abandoned; if busy, the job finishes first. A second signal kills the launch. `ExitTimeOut`
+   is 21700 s to match the 6 h job limit. The sudo'd launch cannot be signalled by `_ghrctl`;
+   deleting the runner makes the in-container listener exit, which ends it.
+7. `ok` cannot see the job queue (the state App has no `Actions: read`), so a queue stuck behind a
+   healthy-looking pool is invisible to the heartbeat; the org-side rescuer covers that case.
+   "Stuck" is judged from GitHub runner status instead: a slot in idle-prep/registered/backoff
+   for over 120 s whose runner is not `online` marks the pool `down`. Slot files with a
+   timestamp more than 5 s in the future also read as `down`.
 8. `sudo` may leave the caller's `HOME`; `launch` re-derives `ghr`'s home before touching Lima.
-9. Role-account UIDs default to 451/452 (`GHRCTL_UID`/`GHRSTATE_UID` override) and the `sysadminctl
+9. Tripwire: a foreign runner name, a slot number beyond the configured count, or custom labels
+   differing from the class label are latched in `/var/db/ghr/tripwire`; while it exists the
+   published state is `down`. Delete the file after fixing the org.
+10. `launch` and `pool` are installed with `GHR_INSTALLED=1`, which makes them ignore every
+   override variable (LIMACTL, GHR_CONFIG, TMPDIR, ...); the repo copy honours them for tests.
+   The sudoers drop-in also sets `!setenv` and a fixed `secure_path`.
+11. The pool lock is a symlink under `~ghr/.ghr/pool.lock` (atomic create, no garbled pid file).
+12. launchd keeps log files open, so newsyslog rotation (installed to `/etc/newsyslog.d/ghr.conf`)
+   takes full effect only after a daemon restart.
+13. Role-account UIDs default to 451/452 (`GHRCTL_UID`/`GHRSTATE_UID` override) and the `sysadminctl
    -roleAccount` flags were not exercised on a real host by the test suite.
