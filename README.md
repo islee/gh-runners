@@ -101,6 +101,7 @@ gh-runners/
 ├── android/      # Docker (official ghcr.io/actions/actions-runner) + KVM emulator
 ├── ios/          # macOS, launchd
 ├── windows/      # Windows, native actions/runner + Task Scheduler
+├── rescuer/      # off-pool container: cancels + re-runs jobs stranded on self-hosted labels
 ├── images/       # derived runner images: light (container) and supabase (Lima golden VM) + build scripts
 ├── tests/        # Gate helpers: runner-loop.sh SELFTEST + self-update.sh syntax checks (slots/ has its own tests/)
 ├── render.yaml   # Render Blueprint for broker/ (rootDir: broker)
