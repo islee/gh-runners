@@ -180,8 +180,12 @@ cache_cli() {
   local dest="$TC/supabase/$CLI_VERSION/$TC_ARCH"
   fetch "https://github.com/supabase/cli/releases/download/v${CLI_VERSION}/supabase_${CLI_VERSION}_linux_arm64.tar.gz" "$TMP/supabase.tgz" "$CLI_SHA256"
   mkdir -p "$dest"
-  tar -xzf "$TMP/supabase.tgz" -C "$dest" supabase
-  chmod 0755 "$dest/supabase"
+  # CRITICAL: extract BOTH binaries. Since 2.10x the release ships `supabase` (a shim) + `supabase-go`
+  # (the CLI it forwards to, looked up next to the shim); the shim alone fails with "Could not find the
+  # supabase-go binary" (seen on the real golden build 2026-10-16).
+  tar -xzf "$TMP/supabase.tgz" -C "$dest" supabase supabase-go
+  [ -x "$dest/supabase-go" ] || die "supabase-go missing from the $CLI_VERSION tarball"
+  chmod 0755 "$dest/supabase" "$dest/supabase-go"
   touch "$TC/supabase/$CLI_VERSION/$TC_ARCH.complete"
 }
 

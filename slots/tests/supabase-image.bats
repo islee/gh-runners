@@ -268,3 +268,10 @@ bb() { bash "$(BUILD)" "$@" 2> /dev/null; }
   [ "$status" -eq 0 ]
   [ ! -s "$LIMA_SEEN" ]
 }
+
+@test "provision: the CLI tarball's supabase-go is extracted next to the supabase shim" {
+  # Regression (real golden build 2026-10-16): the release ships a `supabase` shim + `supabase-go`;
+  # extracting only the shim fails with "Could not find the supabase-go binary".
+  grep -E 'tar -xzf "\$TMP/supabase\.tgz" -C "\$dest" supabase supabase-go' "$(IMG provision.sh)"
+  grep -q -- '-x "$dest/supabase-go"' "$(IMG provision.sh)"
+}
