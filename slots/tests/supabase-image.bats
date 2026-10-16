@@ -159,7 +159,8 @@ PY
 build_shim() {
   LIMA_LOG="$W/lima.log"; STATE="$W/golden.state"; PROV_IN="$W/provision.copy"; LIMA_SEEN="$W/stdin.seen"
   : > "$LIMA_LOG"; : > "$LIMA_SEEN"
-  export LIMA_LOG STATE PROV_IN LIMA_SEEN ORIG_PROVISION="$(IMG provision.sh)"
+  ORIG_PROVISION="$(IMG provision.sh)"
+  export LIMA_LOG STATE PROV_IN LIMA_SEEN ORIG_PROVISION
   cat > "$FAKE_BIN/limactl" <<'SHIM'
 #!/bin/bash
 echo "$*" >> "$LIMA_LOG"
