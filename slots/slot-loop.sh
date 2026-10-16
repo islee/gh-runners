@@ -12,9 +12,10 @@
 #
 # Failure handling: any failed step counts as a failure; consecutive failures back off
 # 30 -> 60 -> 120 -> 240 -> 300 s (capped), a clean cycle resets it.
-# SIGTERM: finish the current job, then exit; a SECOND signal kills the launch immediately.
-# (An idle `registered` slot has no job to finish, so a first SIGTERM may wait for one -- see
-# README Gotchas.)
+# SIGTERM: TERMINATING is checked before reconcile, mint and launch. If the runner is minted but
+# not busy (registered/idle), it is deleted via `reconcile.sh --release` and the launch is
+# abandoned instead of waiting up to 6 h for a job; if it IS busy the current job finishes
+# first. A SECOND signal kills the launch immediately.
 #
 # Dependencies: lib/gh-app.sh, mint-jit.sh, reconcile.sh, /usr/local/libexec/ghr/launch via sudo.
 
@@ -59,7 +60,8 @@ write_state() {
   ( umask 022
     printf '{"slot":"%s-%s","class":"%s","n":%s,"state":"%s","ts":%s,"since":%s,"last_exit":%s}\n' \
       "$CLASS" "$N" "$CLASS" "$N" "$STATE_NAME" "$now" "$STATE_SINCE" "$LAST_EXIT" > "$f.tmp.$$" \
-      && mv -f "$f.tmp.$$" "$f" ) 2> /dev/null || ghr_log "WARN cannot write state file $f"
+      && mv -f "$f.tmp.$$" "$f" ) 2> /dev/null \
+    || { rm -f "$f.tmp.$$" 2> /dev/null; ghr_log "WARN cannot write state file $f"; }
 }
 
 on_signal() {
@@ -79,26 +81,70 @@ do_mint() {
   # shellcheck disable=SC2086
   "$(sibling mint-jit)" "$1" ${LIGHT_LABELS//,/ }
 }
+# do_release NAME — un-register this slot's own idle runner. 0 = deleted/absent, 10 = busy.
+do_release() { "$(sibling reconcile)" --release "$1"; }
 # do_launch — JIT on stdin, never argv/env. Reads the JIT from the global JIT.
 do_launch() { printf '%s\n' "$JIT" | sudo -n -u ghr "$LAUNCH_BIN" "$CLASS" "$N"; }
 
-# run_cycle — one full slot cycle. Returns 0 on a clean cycle, 1 on any failed step.
+# backoff_wait SECONDS — nap in <= TICK chunks, refreshing the state file each chunk so the
+# heartbeat does not mistake a backing-off (but alive) loop for a wedged one. Wakes early on a
+# trapped signal.
+backoff_wait() {
+  local remaining=$1 chunk
+  while [ "$remaining" -gt 0 ] && [ "$TERMINATING" -eq 0 ]; do
+    chunk=$TICK
+    [ "$remaining" -lt "$chunk" ] && chunk=$remaining
+    sleep "$chunk" &
+    wait $! 2> /dev/null
+    remaining=$((remaining - chunk))
+    write_state backoff
+  done
+}
+
+# run_cycle — one full slot cycle. Returns 0 on a clean (or shutdown) cycle, 1 on a failed step.
 run_cycle() {
-  local name="ghr-$CLASS-$N" rc
+  local name="ghr-$CLASS-$N" rc aborted=0
+  [ "$TERMINATING" -eq 0 ] || return 0
   write_state idle-prep
   do_reconcile "$name" || { ghr_log "reconcile failed for $name"; return 1; }
+  [ "$TERMINATING" -eq 0 ] || return 0
   JIT=$(do_mint "$name") || { JIT=""; ghr_log "mint failed for $name"; return 1; }
   [ -n "$JIT" ] || { ghr_log "mint returned nothing for $name"; return 1; }
+  if [ "$TERMINATING" -eq 1 ]; then
+    # Signalled while minting: the runner exists on GitHub but nothing will ever use it.
+    JIT=""
+    do_release "$name" || ghr_log "WARN could not release $name"
+    return 0
+  fi
   write_state registered
   # Background so we can keep the state file fresh for the whole job (up to 6 h).
   do_launch &
   LAUNCH_PID=$!
   JIT=""
   while kill -0 "$LAUNCH_PID" 2> /dev/null; do
+    if [ "$TERMINATING" -eq 1 ] && [ "$aborted" -eq 0 ]; then
+      rc=0
+      do_release "$name" || rc=$?
+      if [ "$rc" -eq 0 ]; then
+        # NOTE: the sudo'd launch is root-owned and cannot be signalled from here; deleting the
+        # runner makes the in-container listener exit, which ends docker run and launch.
+        aborted=1
+        ghr_log "released idle runner $name; abandoning launch"
+        kill -TERM "$LAUNCH_PID" 2> /dev/null
+        break
+      fi
+      ghr_log "runner $name busy (rc=$rc): letting the job finish"
+    fi
     write_state "$STATE_NAME"
     sleep "$TICK" &
     wait $! 2> /dev/null
   done
+  if [ "$aborted" -eq 1 ]; then
+    wait "$LAUNCH_PID" 2> /dev/null
+    LAUNCH_PID=""
+    write_state idle
+    return 0
+  fi
   rc=0
   wait "$LAUNCH_PID" || rc=$?
   LAUNCH_PID=""
@@ -126,8 +172,7 @@ main() {
       backoff=$(next_backoff "$backoff")
       write_state backoff
       ghr_log "backing off ${backoff}s"
-      # sleep+wait so a trapped signal interrupts the nap instead of waiting it out.
-      [ "$TERMINATING" -eq 1 ] || { sleep "$backoff" & wait $! 2> /dev/null; }
+      backoff_wait "$backoff"
     fi
   done
   ghr_log "exiting cleanly"

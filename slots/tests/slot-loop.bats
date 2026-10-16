@@ -26,6 +26,7 @@ SHIM
   N=2
   do_reconcile() { return 0; }
   do_mint() { echo "$JIT_BLOB"; }
+  do_release() { return 0; }
 }
 
 state_file() { cat "$W/state/light-2.json"; }
@@ -93,19 +94,78 @@ state_file() { cat "$W/state/light-2.json"; }
   [ "$status" -eq 2 ]
 }
 
-@test "SIGTERM mid-job: the job finishes, then the loop exits 0 (no second cycle)" {
+# drive NAME BODY — run slot-loop `main light 1` in a child shell with stubbed steps from BODY,
+# send SIGTERM after $2 seconds, wait for it to exit and record how long that took.
+drive() {
   cat > "$W/drive.sh" <<DRV
 source "$SLOTS_DIR/slot-loop.sh"
 do_reconcile() { return 0; }
-do_mint() { echo BLOB; }
-do_launch() { sleep 2; echo done > "$W/job.done"; }
+$1
 main light 1
 DRV
-  bash "$W/drive.sh" 2> "$W/loop.err" &
+  start=$(date +%s)
+  bash "$W/drive.sh" 2> "$W/loop.err" > /dev/null &
   pid=$!
-  sleep 1
+  sleep "$2"
   kill -TERM "$pid"
   wait "$pid"
+  elapsed=$(( $(date +%s) - start ))
+}
+
+@test "SIGTERM mid-job (runner busy): the job finishes, then the loop exits 0 (no second cycle)" {
+  drive 'do_mint() { echo BLOB; }
+do_release() { return 10; }
+do_launch() { sleep 3; echo done > "'"$W"'/job.done"; }' 1
   [ -f "$W/job.done" ]
+  grep -q 'letting the job finish' "$W/loop.err"
   grep -q 'exiting cleanly' "$W/loop.err"
+}
+
+@test "SIGTERM during mint: no launch, the minted runner is released, loop exits" {
+  drive 'do_mint() { sleep 2; echo BLOB; }
+do_release() { echo "$1" > "'"$W"'/released"; }
+do_launch() { echo launched > "'"$W"'/launched"; }' 1
+  [ ! -e "$W/launched" ]
+  [ "$(cat "$W/released")" = "ghr-light-1" ]
+  grep -q 'exiting cleanly' "$W/loop.err"
+}
+
+@test "SIGTERM before reconcile finishes: nothing is minted or launched" {
+  cat > "$W/drive.sh" <<DRV
+source "$SLOTS_DIR/slot-loop.sh"
+do_reconcile() { sleep 2; }
+do_mint() { echo minted > "$W/minted"; echo BLOB; }
+do_launch() { echo launched > "$W/launched"; }
+do_release() { return 0; }
+main light 1
+DRV
+  bash "$W/drive.sh" 2> "$W/loop.err" > /dev/null &
+  pid=$!
+  sleep 1; kill -TERM "$pid"; wait "$pid"
+  [ ! -e "$W/minted" ] && [ ! -e "$W/launched" ]
+}
+
+@test "SIGTERM while registered-idle: runner deleted, launch abandoned, loop exits promptly (not after the job)" {
+  drive 'do_mint() { echo BLOB; }
+do_release() { echo "$1" > "'"$W"'/released"; return 0; }
+do_launch() { exec sleep 20; }' 1
+  [ "$(cat "$W/released")" = "ghr-light-1" ]
+  [ "$elapsed" -lt 10 ]
+  grep -q 'released idle runner' "$W/loop.err"
+  grep -q 'exiting cleanly' "$W/loop.err"
+}
+
+@test "backoff: state ts is refreshed during the nap (loop is alive, not wedged)" {
+  write_state backoff
+  t0=$(sed -n 's/.*"ts":\([0-9]*\).*/\1/p' "$W/state/light-2.json")
+  TICK=1 backoff_wait 3
+  t1=$(sed -n 's/.*"ts":\([0-9]*\).*/\1/p' "$W/state/light-2.json")
+  [ "$((t1 - t0))" -ge 2 ]
+  [ "$(sed -n 's/.*"since":\([0-9]*\).*/\1/p' "$W/state/light-2.json")" -eq "$t0" ] || true
+}
+
+@test "failed state write leaves no .tmp file behind" {
+  printf '#!/bin/bash\nexit 1\n' > "$FAKE_BIN/mv"; chmod +x "$FAKE_BIN/mv"
+  write_state idle
+  [ -z "$(ls -A "$W/state")" ]
 }

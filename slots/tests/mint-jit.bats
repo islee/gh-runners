@@ -110,8 +110,8 @@ tsv_fixture() {
 }
 
 @test "reconcile_pick: exact name only (ghr-light-1 must not match ghr-light-10)" {
-  [ "$(tsv_fixture | reconcile_pick ghr-light-1)" = "1 offline" ]
-  [ "$(tsv_fixture | reconcile_pick ghr-light-10)" = "10 offline" ]
+  [ "$(tsv_fixture | reconcile_pick ghr-light-1)" = "1 offline false" ]
+  [ "$(tsv_fixture | reconcile_pick ghr-light-10)" = "10 offline false" ]
   [ -z "$(tsv_fixture | reconcile_pick ghr-light-3)" ]
 }
 
@@ -143,4 +143,19 @@ tsv_fixture() {
   run bash "$SLOTS_DIR/reconcile.sh" some-other-runner
   [ "$status" -eq 2 ]
   [ ! -s "$CURL_LOG" ]
+}
+
+@test "reconcile --release: deletes OWN idle runner even when online; busy -> exit 10, no delete" {
+  route_token
+  route GET /orgs/test-org/actions/runners 200 '{"runners":[{"id":2,"name":"ghr-light-2","status":"online","busy":false},{"id":3,"name":"ghr-light-3","status":"online","busy":false}]}'
+  route DELETE /orgs/test-org/actions/runners/2 204 ''
+  run bash "$SLOTS_DIR/reconcile.sh" --release ghr-light-2
+  [ "$status" -eq 0 ]
+  grep -q 'CALL DELETE /orgs/test-org/actions/runners/2$' "$CURL_LOG"
+  [ "$(grep -c 'CALL DELETE' "$CURL_LOG")" -eq 1 ]
+  : > "$CURL_LOG"
+  route GET /orgs/test-org/actions/runners 200 '{"runners":[{"id":2,"name":"ghr-light-2","status":"online","busy":true}]}'
+  run bash "$SLOTS_DIR/reconcile.sh" --release ghr-light-2
+  [ "$status" -eq 10 ]
+  refute grep -q 'CALL DELETE' "$CURL_LOG"
 }
