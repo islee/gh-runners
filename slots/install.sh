@@ -31,6 +31,7 @@ STATE_ROOT="${GHR_STATE_ROOT:-/var/db/ghr}"
 LOGDIR="${GHR_LOGDIR:-/var/log/ghr}"
 DAEMON_DIR="${GHR_DAEMON_DIR:-/Library/LaunchDaemons}"
 SUDOERS_FILE="${GHR_SUDOERS:-/etc/sudoers.d/ghr}"
+NEWSYSLOG_FILE="${GHR_NEWSYSLOG:-/etc/newsyslog.d/ghr.conf}"
 CTL_USER=_ghrctl
 STATE_USER=_ghrstate
 # NOTE: spec says "UID 4xx"; sysadminctl's documented role-account range is narrower on some
@@ -63,11 +64,60 @@ render_plist() {
   sed $expr "$tpl" > "$out"
 }
 
-# mkfile OWNER PATH — create an empty 0644 file (BSD install rejects /dev/null as a source).
+# mkfile OWNER PATH — create an empty 0640 file (BSD install rejects /dev/null as a source).
+# WHY 0640: logs can contain runner names and API error snippets; owner + root group only.
 mkfile() {
   run touch "$2"
   run chown "$1" "$2"
-  run chmod 0644 "$2"
+  run chmod 0640 "$2"
+}
+
+# secure_dir PATH [any-owner] — refuse to install into a directory another user could swap
+# files in: it must not be group/other-writable and (unless any-owner) must be owned by root.
+# Missing directories are fine (we create them). ALLOW_NONROOT_OWNER=1 is for tests only.
+secure_dir() {
+  local d=$1 anyowner=${2:-0} line perms uid
+  [ -e "$d" ] || return 0
+  line=$(ls -ldn "$d")
+  perms=${line%% *}
+  uid=$(echo "$line" | awk '{print $3}')
+  case "${perms:5:1}${perms:8:1}" in
+    *w*) echo "refusing to install: $d is group/other-writable ($perms)" >&2; return 1 ;;
+  esac
+  if [ "$anyowner" != 1 ] && [ "${GHR_ALLOW_NONROOT_OWNER:-0}" != 1 ] && [ "$uid" != 0 ]; then
+    echo "refusing to install: $d is not owned by root (uid $uid)" >&2
+    return 1
+  fi
+}
+
+check_install_dirs() {
+  local d
+  for d in /usr/local "$(dirname "$LIBEXEC")" "$LIBEXEC" "$LIBEXEC/lib" "$(dirname "$ETC_DIR")" "$ETC_DIR"; do
+    secure_dir "$d" || return 1
+  done
+  # role homes hold the keys: owned by the role account, but never writable by others
+  for d in "/var/db/$CTL_USER" "/var/db/$STATE_USER"; do secure_dir "$d" 1 || return 1; done
+}
+
+# install_script NAME — install slots/NAME.sh as LIBEXEC/NAME. launch and pool get their
+# GHR_INSTALLED marker flipped to 1 (see launch.sh): the root-owned copies then ignore every
+# caller-controlled override variable.
+install_script() {
+  local s=$1 tmp
+  case "$s" in
+    launch | pool)
+      if [ "$DRY" -eq 1 ]; then
+        echo "DRY: install -m 0755 -o root -g wheel $SRC/$s.sh $LIBEXEC/$s (with GHR_INSTALLED=1)"
+        return
+      fi
+      tmp=$(mktemp "${TMPDIR:-/tmp}/ghr-script.XXXXXX")
+      sed 's/^GHR_INSTALLED=0/GHR_INSTALLED=1/' "$SRC/$s.sh" > "$tmp"
+      grep -q '^GHR_INSTALLED=1' "$tmp" || { rm -f "$tmp"; echo "failed to mark $s as installed" >&2; exit 1; }
+      install -m 0755 -o root -g wheel "$tmp" "$LIBEXEC/$s"
+      rm -f "$tmp"
+      ;;
+    *) run install -m 0755 -o root -g wheel "$SRC/$s.sh" "$LIBEXEC/$s" ;;
+  esac
 }
 
 user_exists() { dscl . -read "/Users/$1" > /dev/null 2>&1; }
@@ -99,9 +149,7 @@ ensure_account() {
 install_files() {
   local s
   run install -d -m 0755 -o root -g wheel "$LIBEXEC" "$LIBEXEC/lib" "$ETC_DIR"
-  for s in $SCRIPTS; do
-    run install -m 0755 -o root -g wheel "$SRC/$s.sh" "$LIBEXEC/$s"
-  done
+  for s in $SCRIPTS; do install_script "$s"; done
   run install -m 0644 -o root -g wheel "$SRC/lib/gh-app.sh" "$LIBEXEC/lib/gh-app.sh"
   if [ -e "$CONFIG_DEST" ]; then
     say "config exists, not overwriting: $CONFIG_DEST"
@@ -120,6 +168,27 @@ install_files() {
   done
   mkfile "$STATE_USER" "$LOGDIR/heartbeat.log"
   mkfile ghr "$LOGDIR/pool.log"
+  install_newsyslog
+}
+
+# install_newsyslog — size-based rotation. NOTE: launchd keeps StandardOutPath open, so a rotated
+# file keeps receiving writes until the daemon restarts; the N flag stops newsyslog signalling.
+install_newsyslog() {
+  local tmp n
+  if [ "$DRY" -eq 1 ]; then
+    echo "DRY: write $NEWSYSLOG_FILE (rotate $LOGDIR/*.log at 5 MB, keep 5, mode 640)"
+    return
+  fi
+  tmp=$(mktemp "${TMPDIR:-/tmp}/ghr-newsyslog.XXXXXX")
+  {
+    echo "# logfilename [owner:group] mode count size(KB) when flags"
+    for n in $(seq 1 "$(slot_count)"); do echo "$LOGDIR/slot-light-$n.log $CTL_USER:wheel 640 5 5120 * JN"; done
+    echo "$LOGDIR/heartbeat.log $STATE_USER:wheel 640 5 5120 * JN"
+    echo "$LOGDIR/pool.log ghr:wheel 640 5 5120 * JN"
+  } > "$tmp"
+  install -d -m 0755 -o root -g wheel "$(dirname "$NEWSYSLOG_FILE")"
+  install -m 0644 -o root -g wheel "$tmp" "$NEWSYSLOG_FILE"
+  rm -f "$tmp"
 }
 
 install_keys() {
@@ -136,24 +205,43 @@ install_keys() {
 }
 
 install_sudoers() {
+  local defaults="Defaults!$LIBEXEC/launch env_reset, !setenv, always_set_home, secure_path=\"/usr/bin:/bin:/usr/sbin:/sbin\""
   local rule="$CTL_USER ALL=(ghr) NOPASSWD: $LIBEXEC/launch"
   if [ "$DRY" -eq 1 ]; then
-    echo "DRY: write sudoers drop-in $SUDOERS_FILE: $rule (validated with visudo -cf before install)"
+    echo "DRY: write sudoers drop-in $SUDOERS_FILE:"
+    echo "DRY:   $defaults"
+    echo "DRY:   $rule"
+    echo "DRY: (validated with visudo -cf before install)"
     return
   fi
   local tmp
   tmp=$(mktemp "${TMPDIR:-/tmp}/ghr-sudoers.XXXXXX")
-  printf '%s\n' "$rule" > "$tmp"
+  # WHY the Defaults line: the caller must not be able to inject environment (!setenv), and the
+  # launch script must see a fixed PATH and ghr's HOME.
+  printf '%s\n%s\n' "$defaults" "$rule" > "$tmp"
   # CRITICAL: never install a sudoers file that fails validation -- it can lock out sudo entirely.
   visudo -cf "$tmp" > /dev/null || { rm -f "$tmp"; echo "sudoers validation failed" >&2; exit 1; }
   install -m 0440 -o root -g wheel "$tmp" "$SUDOERS_FILE"
   rm -f "$tmp"
 }
 
+# wait_unloaded LABEL — bootout is asynchronous; bootstrapping before the old job is gone fails
+# with an I/O error. Bounded wait (30 s).
+wait_unloaded() {
+  local label=$1 i=0
+  if [ "$DRY" -eq 1 ]; then echo "DRY: wait up to 30s until launchctl print system/$label fails"; return; fi
+  while launchctl print "system/$label" > /dev/null 2>&1; do
+    i=$((i + 1))
+    [ "$i" -le 30 ] || { echo "timeout waiting for $label to unload" >&2; return 1; }
+    sleep 1
+  done
+}
+
 bootstrap_daemon() {
   local label=$1 plist=$2
   # bootout first so a re-run picks up a changed plist (ignore "not loaded").
   run launchctl bootout "system/$label" 2> /dev/null || true
+  wait_unloaded "$label"
   run launchctl bootstrap system "$plist"
 }
 
@@ -172,9 +260,11 @@ install_daemons() {
     bootstrap_daemon "dev.ghr.slot.light-$n" "$plist"
   done
   render_plist "$SRC/launchd/dev.ghr.heartbeat.plist" "$tmp/hb.plist" LIBEXEC="$LIBEXEC" STATE_HOME="$state_home" LOGDIR="$LOGDIR"
+  run plutil -lint "$tmp/hb.plist"
   run install -m 0644 -o root -g wheel "$tmp/hb.plist" "$DAEMON_DIR/dev.ghr.heartbeat.plist"
   bootstrap_daemon dev.ghr.heartbeat "$DAEMON_DIR/dev.ghr.heartbeat.plist"
   render_plist "$SRC/launchd/dev.ghr.pool.plist" "$tmp/pool.plist" LIBEXEC="$LIBEXEC" GHR_HOME="$ghr_home" LOGDIR="$LOGDIR"
+  run plutil -lint "$tmp/pool.plist"
   run install -m 0644 -o root -g wheel "$tmp/pool.plist" "$DAEMON_DIR/dev.ghr.pool.plist"
   bootstrap_daemon dev.ghr.pool "$DAEMON_DIR/dev.ghr.pool.plist"
   rm -rf "$tmp"
@@ -197,7 +287,7 @@ do_uninstall() {
     run launchctl bootout "system/dev.ghr.$n" 2> /dev/null || true
     run rm -f "$DAEMON_DIR/dev.ghr.$n.plist"
   done
-  run rm -f "$SUDOERS_FILE"
+  run rm -f "$SUDOERS_FILE" "$NEWSYSLOG_FILE"
   run rm -rf "$LIBEXEC"
   run rm -rf "$STATE_ROOT/slots"
   if [ "$PURGE" -eq 1 ]; then
@@ -234,6 +324,7 @@ main() {
   if [ "$DRY" -eq 0 ] && [ "$(id -u)" -ne 0 ]; then echo "must run as root (sudo)" >&2; exit 1; fi
   if [ "$UNINSTALL" -eq 1 ]; then do_uninstall; exit 0; fi
   if [ "$DRY" -eq 0 ]; then id ghr > /dev/null 2>&1 || { echo "account 'ghr' (Lima VM owner) must exist first" >&2; exit 1; }; fi
+  check_install_dirs || exit 1
   ensure_account "$CTL_USER" "$CTL_UID"
   ensure_account "$STATE_USER" "$STATE_UID"
   install_files

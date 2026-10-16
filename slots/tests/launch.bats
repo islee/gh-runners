@@ -11,10 +11,15 @@ setup() {
   LIMA_LOG="$W/lima.log"
   LIMA_STDIN="$W/lima.stdin"
   : > "$LIMA_LOG"
-  export LIMA_LOG LIMA_STDIN GHR_POOL_LOCK="$W/pool.lock"
+  LIMA_OTHER_STDIN="$W/lima.other.stdin"
+  : > "$LIMA_OTHER_STDIN"
+  export LIMA_LOG LIMA_STDIN LIMA_OTHER_STDIN GHR_POOL_LOCK="$W/pool.lock"
   cat > "$FAKE_BIN/limactl" <<'SHIM'
 #!/bin/bash
 echo "$*" >> "$LIMA_LOG"
+# Every call that is NOT the docker run must have been given /dev/null as stdin; capture what it
+# could read so tests can prove it never swallowed the caller's stdin.
+case "$*" in *"docker run"*) ;; *) cat >> "$LIMA_OTHER_STDIN" ;; esac
 case "$*" in
   "list "*) printf '%s' "${FAKE_POOL_STATUS-Running}" ;;
   *dev/tcp*) exit "${FAKE_PROBE_RC:-1}" ;;
@@ -67,10 +72,43 @@ launch() { printf '%s\n' "$JIT_BLOB" | bash "$SLOTS_DIR/launch.sh" "$@"; }
   [ "$status" -eq 7 ]
 }
 
+@test "image: an option-looking reference (leading '-') is rejected" {
+  sed -i.bak "s#^LIGHT_IMAGE=.*#LIGHT_IMAGE=--privileged@sha256:$(printf 'a%.0s' $(seq 1 64))#" "$W/slots.env"
+  run launch light 1
+  [ "$status" -eq 2 ]
+  [ ! -s "$LIMA_LOG" ]
+}
+
+@test "no non-piping limactl call inherits stdin: extra bytes behind the JIT are never swallowed" {
+  FAKE_POOL_STATUS=Stopped run bash -c "printf '%s\nEXTRA-STDIN\n' '$JIT_BLOB' | bash '$SLOTS_DIR/launch.sh' light 1"
+  [ "$status" -eq 0 ]
+  [ "$(cat "$LIMA_STDIN")" = "$JIT_BLOB" ]
+  [ ! -s "$LIMA_OTHER_STDIN" ]
+  grep -q 'start ghr-pool' "$LIMA_LOG"
+}
+
 @test "preflight: refuses (exit 3) when the guest can reach the LAN probe; no container started" {
   FAKE_PROBE_RC=0 run launch light 1
   [ "$status" -eq 3 ]
   refute grep -q 'docker run' "$LIMA_LOG"
+}
+
+@test "preflight: blocked = rc 1 (refused) or 124 (dropped, timed out)" {
+  for rc in 1 124; do
+    FAKE_PROBE_RC=$rc run launch light 1
+    [ "$status" -eq 0 ]
+  done
+  grep -q 'dev/tcp/192.0.2.1/22' "$LIMA_LOG"
+  grep -q '/usr/bin/timeout 5' "$LIMA_LOG"
+}
+
+@test "preflight fails closed on an erroring/garbled probe (127 missing tool, 2 syntax, 126, 255 ssh)" {
+  for rc in 2 126 127 255; do
+    : > "$LIMA_LOG"
+    FAKE_PROBE_RC=$rc run launch light 1
+    [ "$status" -eq 3 ]
+    refute grep -q 'docker run' "$LIMA_LOG"
+  done
 }
 
 @test "preflight: passes when the LAN probe is blocked" {
@@ -124,4 +162,75 @@ launch() { printf '%s\n' "$JIT_BLOB" | bash "$SLOTS_DIR/launch.sh" "$@"; }
   [ "$status" -eq 64 ]
   run bash "$SLOTS_DIR/pool.sh" nonsense
   [ "$status" -eq 2 ]
+}
+
+# ── installed-copy hardening (privilege boundary) ───────────────────────────────
+
+# installed_copy — what install.sh produces: GHR_INSTALLED flipped to 1, lib alongside.
+installed_copy() {
+  mkdir -p "$W/inst/lib"
+  sed 's/^GHR_INSTALLED=0/GHR_INSTALLED=1/' "$SLOTS_DIR/launch.sh" > "$W/inst/launch"
+  sed 's/^GHR_INSTALLED=0/GHR_INSTALLED=1/' "$SLOTS_DIR/pool.sh" > "$W/inst/pool"
+  cp "$SLOTS_DIR/lib/gh-app.sh" "$W/inst/lib/"
+  chmod +x "$W/inst/launch" "$W/inst/pool"
+}
+
+@test "repo copy pins PATH first and carries the install marker; installer-only difference is that marker" {
+  grep -q '^GHR_INSTALLED=0' "$SLOTS_DIR/launch.sh"
+  grep -q '^GHR_INSTALLED=0' "$SLOTS_DIR/pool.sh"
+  first=$(grep -n '^PATH=/usr/bin:/bin:/usr/sbin:/sbin$' "$SLOTS_DIR/launch.sh" | head -1 | cut -d: -f1)
+  # no executable statement (other than comments/blank) precedes the PATH pin
+  [ -z "$(head -n $((first - 1)) "$SLOTS_DIR/launch.sh" | grep -vE '^\s*(#|$)')" ]
+}
+
+@test "installed copy ignores caller overrides (LIMACTL, GHR_CONFIG, PATH shims, TMPDIR) and runs nothing from them" {
+  installed_copy
+  printf '#!/bin/bash\ntouch "%s/RAN-marker-limactl"\n' "$W" > "$W/evil-limactl"
+  printf '#!/bin/bash\ntouch "%s/RAN-marker-id"\necho root\n' "$W" > "$FAKE_BIN/id"
+  printf '#!/bin/bash\ntouch "%s/RAN-marker-dscl"\n' "$W" > "$FAKE_BIN/dscl"
+  chmod +x "$W/evil-limactl" "$FAKE_BIN/id" "$FAKE_BIN/dscl"
+  LIMACTL="$W/evil-limactl" POOL_INSTANCE=evil GHR_CONFIG="$W/nonexistent.env" BASH_ENV="$W/evil-env" \
+    run bash -c "printf '%s\n' '$JIT_BLOB' | '$W/inst/launch' light 1"
+  [ "$status" -ne 0 ]
+  [ ! -e "$W/RAN-marker-limactl" ] && [ ! -e "$W/RAN-marker-id" ] && [ ! -e "$W/RAN-marker-dscl" ]
+}
+
+@test "installed copy reads config only from the fixed root-owned path (GHR_CONFIG override is dropped)" {
+  installed_copy
+  run bash -c "printf '%s\n' '$JIT_BLOB' | GHR_CONFIG='$W/nonexistent.env' '$W/inst/launch' light 1 2>&1"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"/usr/local/etc/ghr/slots.env"* ]]
+  [[ "$output" != *"nonexistent.env"* ]]
+}
+
+# ── pool.sh lock ──────────────────────────────────────────────────────────────
+
+@test "pool lock: a lock whose owner pid is dead is taken over" {
+  ln -s 999999 "$W/pool.lock"
+  FAKE_POOL_STATUS=Stopped run bash "$SLOTS_DIR/pool.sh" ensure
+  [ "$status" -eq 0 ]
+  grep -q 'start ghr-pool' "$LIMA_LOG"
+  [ ! -e "$W/pool.lock" ] && [ ! -L "$W/pool.lock" ]
+}
+
+@test "pool lock: a garbled owner record is reaped immediately" {
+  ln -s "not-a-pid" "$W/pool.lock"
+  FAKE_POOL_STATUS=Stopped run bash "$SLOTS_DIR/pool.sh" ensure
+  [ "$status" -eq 0 ]
+  [ ! -L "$W/pool.lock" ]
+}
+
+@test "pool lock: a live owner is respected (wait budget exhausted -> error, nothing started)" {
+  ln -s "$$" "$W/pool.lock"
+  FAKE_POOL_STATUS=Stopped POOL_LOCK_WAIT=2 run bash "$SLOTS_DIR/pool.sh" ensure
+  [ "$status" -eq 1 ]
+  refute grep -q 'start ghr-pool' "$LIMA_LOG"
+  [ -L "$W/pool.lock" ]
+}
+
+@test "pool lock default lives under HOME/.ghr, not /tmp" {
+  unset GHR_POOL_LOCK
+  FAKE_POOL_STATUS=Stopped run bash "$SLOTS_DIR/pool.sh" ensure
+  [ "$status" -eq 0 ]
+  [ -d "$HOME/.ghr" ]
 }

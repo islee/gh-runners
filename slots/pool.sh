@@ -10,6 +10,14 @@
 # NOTE: `limactl start` leaves a long-lived host agent behind; the launchd job that ends up
 # running this therefore sets AbandonProcessGroup, or launchd would kill the VM on exit.
 
+# CRITICAL: launch.sh (the sudo boundary) runs this script; same hardening as launch.sh.
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+export PATH
+GHR_INSTALLED=0   # install.sh rewrites to 1 in the root-owned copy; see launch.sh
+if [ "$GHR_INSTALLED" = 1 ]; then
+  unset LIMA_HOME BASH_ENV ENV CDPATH LIMACTL POOL_INSTANCE POOL_GOLDEN POOL_LOCK_WAIT GHR_POOL_LOCK TMPDIR
+fi
+
 set -euo pipefail
 
 LIMACTL="${LIMACTL:-/usr/local/bin/limactl}"
@@ -19,26 +27,47 @@ POOL_LOCK_WAIT="${POOL_LOCK_WAIT:-900}"
 
 pool_log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] pool: $*" >&2; }
 
-# NOTE: lock under /tmp, not $HOME: only `ghr` ever runs this, and a sudo-inherited HOME may not be writable.
 # Serialise concurrent ensure calls: six slot loops can all hit a stopped VM at once and a
-# double `limactl clone/start` would fail or corrupt. mkdir is the portable atomic lock.
+# double `limactl clone/start` would fail or corrupt.
+# WHY a symlink lock: `ln -s <pid> lock` creates the lock AND its owner record atomically, so a
+# crash can never leave an empty/garbled pid file (the failure mode of mkdir+echo). A target that
+# is not a live pid is stale and is taken over by rename (mv), which only one reaper can win.
+# NOTE: the residual race (a reaper moving a lock someone else just re-created) is detected and
+# undone below; at worst two ensure calls overlap and `limactl start` fails loudly and is retried
+# by the next launch.
+pool_lock_path() { echo "${GHR_POOL_LOCK:-${HOME:?HOME unset}/.ghr/pool.lock}"; }
+
 pool_lock() {
-  local lock="${GHR_POOL_LOCK:-/tmp/ghr-pool.lock}" waited=0 owner
-  while ! mkdir "$lock" 2> /dev/null; do
-    owner=$(cat "$lock/pid" 2> /dev/null || true)
-    # Reap a lock whose owner died (crash/kill) so the pool can't wedge forever.
-    if [ -n "$owner" ] && ! kill -0 "$owner" 2> /dev/null; then
-      rm -rf "$lock"
+  local lock waited=0 owner moved
+  lock=$(pool_lock_path)
+  mkdir -p "$(dirname "$lock")" && chmod 700 "$(dirname "$lock")" || return 1
+  while ! ln -s "$$" "$lock" 2> /dev/null; do
+    owner=$(readlink "$lock" 2> /dev/null || true)
+    if ! [[ "$owner" =~ ^[0-9]+$ ]] || ! kill -0 "$owner" 2> /dev/null; then
+      moved="$lock.reap.$$"
+      if mv "$lock" "$moved" 2> /dev/null; then
+        if [ "$(readlink "$moved" 2> /dev/null || true)" = "$owner" ]; then
+          rm -f "$moved"
+        else
+          # We moved a lock that was re-created in the meantime: put it back.
+          ln -s "$(readlink "$moved" 2> /dev/null || echo 0)" "$lock" 2> /dev/null || true
+          rm -f "$moved"
+        fi
+      fi
       continue
     fi
     [ "$waited" -lt "$POOL_LOCK_WAIT" ] || { pool_log "ERROR lock wait exceeded"; return 1; }
     sleep 2
     waited=$((waited + 2))
   done
-  echo "$$" > "$lock/pid"
   POOL_LOCK_HELD="$lock"
 }
-pool_unlock() { [ -z "${POOL_LOCK_HELD:-}" ] || rm -rf "$POOL_LOCK_HELD"; }
+pool_unlock() {
+  [ -z "${POOL_LOCK_HELD:-}" ] && return 0
+  # Only remove a lock that is still ours.
+  [ "$(readlink "$POOL_LOCK_HELD" 2> /dev/null || true)" = "$$" ] && rm -f "$POOL_LOCK_HELD"
+  return 0
+}
 
 pool_status() {
   "$LIMACTL" list "$POOL_INSTANCE" --format '{{.Status}}' < /dev/null 2> /dev/null || true

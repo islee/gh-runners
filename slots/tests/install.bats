@@ -6,6 +6,7 @@ load helpers
 
 setup() {
   slots_setup
+  export GHR_ALLOW_NONROOT_OWNER=1 GHR_NEWSYSLOG="$W/newsyslog-ghr.conf"
   export GHR_LIBEXEC="$W/libexec" GHR_ETC="$W/etc" GHR_STATE_ROOT="$W/varghr" GHR_LOGDIR="$W/log" \
     GHR_DAEMON_DIR="$W/daemons" GHR_SUDOERS="$W/sudoers-ghr"
 }
@@ -32,6 +33,45 @@ setup() {
   [ ! -e "$W/libexec" ] && [ ! -e "$W/etc" ] && [ ! -e "$W/daemons" ] && [ ! -e "$W/sudoers-ghr" ] && [ ! -e "$W/varghr" ]
 }
 
+@test "--dry-run: hardened sudoers (Defaults before the rule), root:wheel 0755 scripts, 0400 keys, 0640 logs" {
+  run bash "$SLOTS_DIR/install.sh" --dry-run --runner-key /k/r.pem --state-key /k/s.pem
+  [ "$status" -eq 0 ]
+  d="Defaults!$W/libexec/launch env_reset, !setenv, always_set_home, secure_path=\"/usr/bin:/bin:/usr/sbin:/sbin\""
+  r="_ghrctl ALL=(ghr) NOPASSWD: $W/libexec/launch"
+  [[ "$output" == *"$d"* ]]
+  # Defaults line precedes the NOPASSWD rule
+  [ "$(grep -n -F -e "$d" <<< "$output" | head -1 | cut -d: -f1)" -lt "$(grep -n -F -e "$r" <<< "$output" | head -1 | cut -d: -f1)" ]
+  for s in slot-loop mint-jit reconcile launch heartbeat pool; do
+    [[ "$output" == *"install -m 0755 -o root -g wheel $SLOTS_DIR/$s.sh $W/libexec/$s"* ]]
+  done
+  [[ "$output" == *"install -m 0644 -o root -g wheel $SLOTS_DIR/lib/gh-app.sh $W/libexec/lib/gh-app.sh"* ]]
+  [[ "$output" == *"install -m 0400 -o _ghrctl /k/r.pem /var/db/_ghrctl/runner-app.pem"* ]]
+  [[ "$output" == *"install -m 0400 -o _ghrstate /k/s.pem /var/db/_ghrstate/state-app.pem"* ]]
+  [[ "$output" == *"launch.sh $W/libexec/launch (with GHR_INSTALLED=1)"* ]]
+  [[ "$output" == *"pool.sh $W/libexec/pool (with GHR_INSTALLED=1)"* ]]
+  [[ "$output" == *"chmod 0640 $W/log/slot-light-1.log"* ]]
+  [[ "$output" == *"write $W/newsyslog-ghr.conf"* ]]
+  [[ "$output" == *"wait up to 30s until launchctl print system/dev.ghr.heartbeat fails"* ]]
+  for p in slot hb pool; do [[ "$output" == *"plutil -lint"*"$p.plist"* ]]; done
+}
+
+@test "refuses to install into group/other-writable or non-root-owned directories" {
+  mkdir -p "$W/libexec"; chmod 777 "$W/libexec"
+  run bash "$SLOTS_DIR/install.sh" --dry-run
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"group/other-writable"* ]]
+  chmod 775 "$W/libexec"
+  run bash "$SLOTS_DIR/install.sh" --dry-run
+  [ "$status" -eq 1 ]
+  chmod 755 "$W/libexec"
+  run bash "$SLOTS_DIR/install.sh" --dry-run
+  [ "$status" -eq 0 ]
+  # root-ownership is enforced unless the test-only escape hatch is set
+  GHR_ALLOW_NONROOT_OWNER=0 run bash "$SLOTS_DIR/install.sh" --dry-run
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"not owned by root"* ]]
+}
+
 @test "--dry-run honours LIGHT_SLOTS from --config (and caps at 6)" {
   printf 'LIGHT_SLOTS=2\n' > "$W/cfg.env"
   run bash "$SLOTS_DIR/install.sh" --dry-run --config "$W/cfg.env"
@@ -48,7 +88,7 @@ setup() {
   run bash "$SLOTS_DIR/install.sh" --dry-run --uninstall
   [ "$status" -eq 0 ]
   [[ "$output" == *"launchctl bootout system/dev.ghr.heartbeat"* ]]
-  [[ "$output" == *"rm -f $W/sudoers-ghr"* ]]
+  [[ "$output" == *"rm -f $W/sudoers-ghr $W/newsyslog-ghr.conf"* ]]
   [[ "$output" == *"rm -rf $W/libexec"* ]]
   refute grep -q 'deleteUser' <<< "$output"
   run bash "$SLOTS_DIR/install.sh" --dry-run --uninstall --purge
