@@ -70,16 +70,27 @@ compute() { compute_state "$W/state" "${1:-$NOW}" "$RUNNERS" "$HB"; }
   [ "$(compute)" = "down" ]
 }
 
-@test "down: slot stuck registered > STUCK_SECS while its runner is not online" {
+@test "down: a slot seen without an online runner on two heartbeats > STUCK_SECS apart" {
   healthy_slots
   printf '1\tghr-light-1\tonline\tfalse\n3\tghr-light-3\tonline\tfalse\n' > "$RUNNERS"   # slot 2 absent
-  slot 2 registered 5 121
-  [ "$(compute)" = "down" ]
-  # same slot but only 60 s into registered (VM/docker still starting): not stuck yet
-  slot 2 registered 5 60
-  [ "$(compute)" = "ok" ]
-  slot 2 registered 5 120    # boundary: STUCK_SECS default is 120
-  [ "$(compute)" = "ok" ]
+  slot 2 registered 5 20000
+  [ "$(compute "$NOW")" = "ok" ]                   # first sighting only starts the clock
+  [ "$(compute "$((NOW + 45))")" = "ok" ]          # boundary: STUCK_SECS default 45 (strictly greater)
+  [ "$(compute "$((NOW + 60))")" = "down" ]        # next heartbeat: still absent -> stuck
+}
+
+@test "ok: a just-finished job (old since, runner already deleted) is not stuck; runner back online resets" {
+  # Regression (live, 2026-10-16): during a job the slot stays `registered` with the mint time as
+  # `since`; GitHub deletes the single-use runner a few seconds before the loop writes its next state.
+  healthy_slots
+  printf '1\tghr-light-1\tonline\tfalse\n3\tghr-light-3\tonline\tfalse\n' > "$RUNNERS"
+  slot 2 registered 5 400                          # registered 400 s ago, runner gone right now
+  [ "$(compute "$NOW")" = "ok" ]
+  all_online                                       # the loop re-minted: runner online again
+  [ "$(compute "$((NOW + 60))")" = "ok" ]
+  [ ! -e "$HB/notonline_light-2" ]                 # clock reset
+  printf '1\tghr-light-1\tonline\tfalse\n3\tghr-light-3\tonline\tfalse\n' > "$RUNNERS"
+  [ "$(compute "$((NOW + 100))")" = "ok" ]         # a later blip starts a NEW clock, not the old one
 }
 
 @test "ok: a long-registered slot whose runner IS online is just idle, not stuck" {
@@ -88,11 +99,12 @@ compute() { compute_state "$W/state" "${1:-$NOW}" "$RUNNERS" "$HB"; }
   [ "$(compute)" = "ok" ]
 }
 
-@test "down: a slot in backoff for > STUCK_SECS (mint/launch keep failing)" {
+@test "down: a slot in backoff with no online runner on two heartbeats (mint/launch keep failing)" {
   healthy_slots
   printf '1\tghr-light-1\tonline\tfalse\n3\tghr-light-3\tonline\tfalse\n' > "$RUNNERS"
   slot 2 backoff 5 400
-  [ "$(compute)" = "down" ]
+  [ "$(compute "$NOW")" = "ok" ]
+  [ "$(compute "$((NOW + 60))")" = "down" ]
 }
 
 @test "saturated: all slots busy for >= 60 s; ok until then; resets when one frees up" {

@@ -30,8 +30,9 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GHR_STATE_DIR="${GHR_STATE_DIR:-/var/db/ghr/slots}"
 GHR_HB_ROOT="${GHR_HB_ROOT:-/var/db/ghr}"
 STALE_SECS="${STALE_SECS:-120}"
-# 120 s so a wedged slot is flagged within 3 min even counting the 60 s heartbeat interval.
-STUCK_SECS="${STUCK_SECS:-120}"
+# Stuck = no online runner on two consecutive heartbeats (60 s apart, > 45 s): a wedged slot goes down
+# about 2 min after GitHub marks it offline; a finishing job (runner gone for 2-5 s) is never seen twice.
+STUCK_SECS="${STUCK_SECS:-45}"
 # Tolerated clock skew between a slot file and this process.
 FUTURE_SECS="${FUTURE_SECS:-5}"
 SATURATED_SECS="${SATURATED_SECS:-60}"
@@ -46,7 +47,8 @@ state_field_str() { sed -n "s/.*\"$2\":\"\([a-z-]*\)\".*/\1/p" "$1" | head -1; }
 # "busy for > 60 s" survives the 60 s process lifetime.
 compute_state() {
   local dir=$1 now=$2 runners=$3 hb=$4
-  local class count n f ts since st name status busy total=0 busy_ct=0 age
+  local class count n f ts since st name status busy total=0 busy_ct=0 first mark
+  mkdir -p "$hb" 2> /dev/null
   for class in light supabase; do
     case $class in
       light) count=${LIGHT_SLOTS:-0} ;;
@@ -68,18 +70,29 @@ compute_state() {
       # NOTE: no awk `exit` (would SIGPIPE a producer under pipefail); first match wins via flag.
       status=$(awk -F'\t' -v nm="$name" '$2 == nm && !f { print $3; f = 1 }' "$runners")
       busy=$(awk -F'\t' -v nm="$name" '$2 == nm && !f { print $4; f = 1 }' "$runners")
+      # Stuck = a slot that wants a runner (idle-prep/registered/backoff) whose runner is not online on
+      # TWO consecutive heartbeats. Timed from the first heartbeat that OBSERVED it, kept in $hb.
+      # WHY not from `since`: during a job the state stays `registered` with the mint time as `since`;
+      # when the job ends GitHub deletes the single-use runner seconds before the loop writes its next
+      # state, so `since`-based timing called a just-finished slot stuck (live false `down`, 2026-10-16).
+      mark="$hb/notonline_$class-$n"
       case "$st" in
         idle-prep | registered | backoff)
-          age=$((now - since))
-          if [ "$age" -gt "$STUCK_SECS" ] && [ "$status" != "online" ]; then echo down; return 0; fi
+          if [ "$status" = "online" ]; then
+            rm -f "$mark"
+          else
+            first=$(cat "$mark" 2> /dev/null || true)
+            if ! [[ "$first" =~ ^[0-9]+$ ]] || [ "$first" -gt "$now" ]; then first=$now; echo "$now" > "$mark"; fi
+            if [ "$((now - first))" -gt "$STUCK_SECS" ]; then echo down; return 0; fi
+          fi
           ;;
+        *) rm -f "$mark" ;;
       esac
       [ "$busy" = "true" ] && busy_ct=$((busy_ct + 1))
       n=$((n + 1))
     done
   done
   [ "$total" -gt 0 ] || { echo down; return 0; }
-  mkdir -p "$hb" 2> /dev/null
   if [ "$busy_ct" -eq "$total" ]; then
     local first
     first=$(cat "$hb/all_busy_since" 2> /dev/null || true)
