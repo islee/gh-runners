@@ -1,5 +1,9 @@
 # hadolint config for the runner Dockerfiles.
 ignored:
+  # DL3066 — "non-numeric user-id may not be resolvable by host system". These images run as the official
+  # actions-runner image's named `runner` user, which exists inside the image; nothing maps it to a host uid.
+  # Appeared when the unpinned hadolint image picked up the rule (2026-10), not from a change here.
+  - DL3066
   # DL3008 — "pin apt versions". Intentionally unpinned: these are templates, and the toolchain
   # (Node/JDK/Android/Docker CLI) is meant to track distro/repo latest or be set via build args.
   - DL3008
