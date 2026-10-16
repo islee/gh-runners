@@ -114,6 +114,11 @@ launch_run() {
 main() {
   # cwd must be readable by `ghr`: sudo keeps the caller's cwd (_ghrctl's 0700 home).
   cd / || exit 2
+  [ "$#" -eq 2 ] || { echo "usage: launch <class> <n>   (JIT config on stdin)" >&2; exit 2; }
+  # IMPORTANT: config before HOME. The root-owned config path is fixed in the installed copy, so
+  # validating it first needs nothing from the account database; it also keeps the error order the
+  # same on Linux CI, which has no dscl.
+  ghr_load_config || exit 2
   # WHY: limactl locates its instances via $HOME; sudo may leave the caller's (_ghrctl) HOME in
   # place. Installed copy: take ghr's home from the account database (dscl), never from the
   # environment, and fail closed. Repo/test copy keeps the caller's HOME (no dscl on CI).
@@ -125,8 +130,6 @@ main() {
     HOME=$home
     export HOME
   fi
-  [ "$#" -eq 2 ] || { echo "usage: launch <class> <n>   (JIT config on stdin)" >&2; exit 2; }
-  ghr_load_config || exit 2
   launch_validate_args "$1" "$2" || exit 2
   local cname="ghr-$1-$2" jit=""
   IFS= read -r jit || true
