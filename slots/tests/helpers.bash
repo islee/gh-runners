@@ -97,3 +97,34 @@ b64url_decode() {
 # refute CMD... — assert CMD fails. WHY not bare `! cmd`: bats runs under set -e, which ignores a
 # negated command that is not the last line of a test, so `! grep ...` would pass vacuously.
 refute() { if "$@"; then return 1; fi; }
+
+# lima_setup — limactl shim shared by the launch suites. Records every call in $LIMA_LOG; every
+# call that is not a runner start has its stdin captured in $LIMA_OTHER_STDIN so tests can prove no
+# limactl call swallowed the caller's stdin. Knobs (env): FAKE_POOL_STATUS (light pool VM),
+# FAKE_GOLDEN_STATUS (default Stopped), FAKE_VM_STATUS (per-job VM, default absent), FAKE_PROBE_RC,
+# FAKE_RUN_RC, FAKE_RUN_SLEEP, FAKE_CLONE_RC, FAKE_CLONE_SLEEP, FAKE_START_RC.
+lima_setup() {
+  LIMA_LOG="$W/lima.log"
+  LIMA_STDIN="$W/lima.stdin"
+  LIMA_OTHER_STDIN="$W/lima.other.stdin"
+  : > "$LIMA_LOG"
+  : > "$LIMA_OTHER_STDIN"
+  export LIMA_LOG LIMA_STDIN LIMA_OTHER_STDIN GHR_POOL_LOCK="$W/pool.lock"
+  cat > "$FAKE_BIN/limactl" <<'SHIM'
+#!/bin/bash
+echo "$*" >> "$LIMA_LOG"
+case "$*" in *"docker run"* | *"sudo -u runner"*) ;; *) cat >> "$LIMA_OTHER_STDIN" ;; esac
+case "$*" in
+  "list ghr-supa-golden"*) printf '%s' "${FAKE_GOLDEN_STATUS-Stopped}" ;;
+  "list ghr-supa-"*) printf '%s' "${FAKE_VM_STATUS-}" ;;
+  "list "*) printf '%s' "${FAKE_POOL_STATUS-Running}" ;;
+  "clone "*) sleep "${FAKE_CLONE_SLEEP:-0}"; exit "${FAKE_CLONE_RC:-0}" ;;
+  "start ghr-supa-"*) exit "${FAKE_START_RC:-0}" ;;
+  *dev/tcp*) exit "${FAKE_PROBE_RC:-1}" ;;
+  *"docker run"* | *"sudo -u runner"*) cat > "$LIMA_STDIN"; sleep "${FAKE_RUN_SLEEP:-0}"; exit "${FAKE_RUN_RC:-0}" ;;
+  *) exit 0 ;;
+esac
+SHIM
+  chmod +x "$FAKE_BIN/limactl"
+  export LIMACTL="$FAKE_BIN/limactl"
+}

@@ -224,3 +224,36 @@ compute() { compute_state "$W/state" "${1:-$NOW}" "$RUNNERS" "$HB"; }
   [ "$status" -ne 0 ]
   refute grep -q 'CALL PATCH' "$CURL_LOG"
 }
+
+@test "supabase class: counted in the state (missing slot file -> down; fresh -> ok; stuck -> down)" {
+  healthy_slots
+  SUPABASE_SLOTS=2
+  [ "$(compute)" = "down" ]
+  for n in 1 2; do
+    printf '{"slot":"supabase-%s","class":"supabase","n":%s,"state":"registered","ts":%s,"since":%s,"last_exit":0}\n' "$n" "$n" "$((NOW - 5))" "$((NOW - 5))" > "$W/state/supabase-$n.json"
+  done
+  printf '%s\n' "$(printf '1\tghr-light-1\tonline\tfalse\tghr-light')" "$(printf '2\tghr-light-2\tonline\tfalse\tghr-light')" "$(printf '3\tghr-light-3\tonline\tfalse\tghr-light')" "$(printf '4\tghr-supabase-1\tonline\tfalse\tghr-supabase')" "$(printf '5\tghr-supabase-2\tonline\tfalse\tghr-supabase')" > "$RUNNERS"
+  [ "$(compute)" = "ok" ]
+  printf '{"slot":"supabase-2","class":"supabase","n":2,"state":"registered","ts":%s,"since":%s,"last_exit":0}\n' "$((NOW - 5))" "$((NOW - 500))" > "$W/state/supabase-2.json"
+  printf '%s\n' "$(printf '1\tghr-light-1\tonline\tfalse\tghr-light')" "$(printf '2\tghr-light-2\tonline\tfalse\tghr-light')" "$(printf '3\tghr-light-3\tonline\tfalse\tghr-light')" "$(printf '4\tghr-supabase-1\tonline\tfalse\tghr-supabase')" > "$RUNNERS"
+  # stuck = absent on two consecutive heartbeats: first sighting is still ok, the next one is down
+  [ "$(compute "$NOW")" = "ok" ]
+  [ "$(compute "$((NOW + 60))")" = "down" ]
+}
+
+@test "supabase tripwire: slot above SUPABASE_SLOTS, wrong labels, or class disabled (count 0)" {
+  SUPABASE_SLOTS=2
+  out=$(printf '%s\n' \
+    "$(printf '1\tghr-supabase-1\tonline\tfalse\tghr-supabase')" \
+    "$(printf '2\tghr-supabase-2\tonline\tfalse\tghr-supabase')" \
+    "$(printf '3\tghr-supabase-3\tonline\tfalse\tghr-supabase')" \
+    "$(printf '4\tghr-supabase-1\tonline\tfalse\tghr-light')" | tripwire_names)
+  [ "$out" = "$(printf 'ghr-supabase-3\nghr-supabase-1')" ]
+  SUPABASE_SLOTS=0
+  out=$(printf '%s\n' "$(printf '1\tghr-supabase-1\tonline\tfalse\tghr-supabase')" | tripwire_names)
+  [ "$out" = "ghr-supabase-1" ]
+  SUPABASE_SLOTS=2
+  SUPABASE_LABELS="custom-supa"
+  out=$(printf '%s\n' "$(printf '1\tghr-supabase-1\tonline\tfalse\tcustom-supa')" | tripwire_names)
+  [ -z "$out" ]
+}

@@ -78,8 +78,10 @@ on_signal() {
 do_reconcile() { "$(sibling reconcile)" "$1"; }
 # NOTE: labels word-split on purpose (config holds `a,b` or `a b`); mint-jit validates each.
 do_mint() {
+  local labels
+  case "$CLASS" in light) labels=$LIGHT_LABELS ;; supabase) labels=$SUPABASE_LABELS ;; esac
   # shellcheck disable=SC2086
-  "$(sibling mint-jit)" "$1" ${LIGHT_LABELS//,/ }
+  "$(sibling mint-jit)" "$1" ${labels//,/ }
 }
 # do_release NAME — un-register this slot's own idle runner. 0 = deleted/absent, 10 = busy.
 do_release() { "$(sibling reconcile)" --release "$1"; }
@@ -158,10 +160,12 @@ main() {
   [ "$#" -eq 2 ] || { echo "usage: slot-loop.sh <class> <n>" >&2; exit 2; }
   CLASS=$1
   N=$2
-  [ "$CLASS" = "light" ] || { echo "slot-loop: unsupported class: $CLASS" >&2; exit 2; }
+  case "$CLASS" in light | supabase) ;; *) echo "slot-loop: unsupported class: $CLASS" >&2; exit 2 ;; esac
   [[ "$N" =~ ^[1-9][0-9]*$ ]] || { echo "slot-loop: invalid slot number" >&2; exit 2; }
   ghr_load_config || exit 1
-  [ "$N" -le "$LIGHT_SLOTS" ] || { echo "slot-loop: slot beyond LIGHT_SLOTS" >&2; exit 2; }
+  local max
+  case "$CLASS" in light) max=$LIGHT_SLOTS ;; supabase) max=$SUPABASE_SLOTS ;; esac
+  [ "$N" -le "$max" ] || { echo "slot-loop: slot beyond configured ${CLASS} slots" >&2; exit 2; }
   ghr_valid_runner_name "ghr-$CLASS-$N" || exit 2
   trap on_signal TERM INT
   local backoff=0
