@@ -9,7 +9,12 @@ Credentials are designed so **no runner host holds a standing GitHub admin crede
 [`broker/`](broker/) service mints short-lived registration tokens from a GitHub App, and runners
 fetch one each cycle.
 
-## The broker
+> **Direction (in progress):** the [`slots/`](slots/) controller (org-level JIT runners, one launchd
+> daemon per slot, no broker) is the successor to the broker + systemd installers below. `broker/`
+> and the systemd-based `light/` / `supabase/` installers are **legacy-in-progress**: kept working
+> and documented, but new deployments should start from `slots/`.
+
+## The broker (legacy-in-progress)
 
 [`broker/`](broker/) is a tiny FastAPI service that turns a GitHub App into short-lived runner
 registration tokens. Deploy it once (always-on), then point every runner at it via `BROKER_URL` +
@@ -21,6 +26,7 @@ or **Docker** ([`broker/docker-compose.yml`](broker/docker-compose.yml) / `broke
 
 | Dir | Workload | Runtime | Default labels |
 |-----|----------|---------|----------------|
+| [`slots/`](slots/) | Lint / unit (`light` class; `supabase` later) as a pool of single-use runners | macOS launchd **slot loops** + org **JIT** runner configs, containers inside a Lima VM, no broker | `ghr-light` (per `ALLOWED_LABELS`) |
 | [`light/`](light/) | Lint / unit / anything without Docker | Vanilla `actions/runner` + **systemd** (no Docker) | `self-hosted,linux,x64,light` |
 | [`supabase/`](supabase/) | Jobs that run a Docker stack (e.g. `supabase start`) | Vanilla `actions/runner` + **systemd**, on a host that has Docker | `self-hosted,linux,x64,supabase` |
 | [`android/`](android/) | Android E2E (emulator + Maestro) | **Docker** on the official `ghcr.io/actions/actions-runner` image, KVM-accelerated | `self-hosted,linux,x64,mobile,android` |
@@ -86,14 +92,16 @@ runner installer / compose / Render dashboard.
 
 ```
 gh-runners/
-├── broker/       # token broker (FastAPI): GitHub App → short-lived registration tokens
+├── broker/       # token broker (FastAPI): GitHub App → short-lived registration tokens  [legacy-in-progress]
 │                 #   Dockerfile, docker-compose.yml, tests/  (Render via root render.yaml)
-├── light/        # Linux, systemd, no Docker        (+ docker/ container variant)
-├── supabase/     # Linux, systemd, host has Docker   (+ docker/ container variant)
+├── slots/        # macOS host: JIT slot loops + Lima pool + health heartbeat (successor to broker/ + systemd)
+│                 #   lib/, launchd/ templates, install.sh, tests/ (bats)
+├── light/        # Linux, systemd, no Docker        (+ docker/ container variant)  [legacy-in-progress]
+├── supabase/     # Linux, systemd, host has Docker   (+ docker/ container variant)  [legacy-in-progress]
 ├── android/      # Docker (official ghcr.io/actions/actions-runner) + KVM emulator
 ├── ios/          # macOS, launchd
 ├── windows/      # Windows, native actions/runner + Task Scheduler
-├── tests/        # Gate helpers: runner-loop.sh SELFTEST + self-update.sh syntax checks
+├── tests/        # Gate helpers: runner-loop.sh SELFTEST + self-update.sh syntax checks (slots/ has its own tests/)
 ├── render.yaml   # Render Blueprint for broker/ (rootDir: broker)
 ├── .env.{render,pve,mac}.example   # per-target env templates (real ones gitignored)
 ├── README.md  LICENSE  .gitignore  .hadolint.yaml
