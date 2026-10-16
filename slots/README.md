@@ -28,6 +28,7 @@ LaunchDaemon dev.ghr.slot.light-N  (_ghrctl)        LaunchDaemon dev.ghr.heartbe
 | `install.sh` | root | Accounts, dirs, sudoers, scripts, config, plists; `--dry-run`, `--uninstall [--purge]` |
 | `launchd/*.plist` | root | Templates for slot / heartbeat / pool daemons (`@PLACEHOLDER@` rendered by install.sh) |
 | `config.example.env` | root | Template for `/usr/local/etc/ghr/slots.env` (no secrets) |
+| `../images/light/`, `../images/build-light.sh` | ghr | Derived runner image (hosted-parity tools + pre-warmed tool cache) and its Lima build script |
 | `tests/*.bats`, `tests/helpers.bash`, `tests/run-bats.sh` | CI | Offline suite; curl/limactl/sudo are shims |
 
 ## Patterns
@@ -36,7 +37,8 @@ LaunchDaemon dev.ghr.slot.light-N  (_ghrctl)        LaunchDaemon dev.ghr.heartbe
    shell variable and moves only through pipes (`printf` is a builtin): slot-loop to `sudo` to
    `launch` to `limactl` to the container's `read -r J; exec ./run.sh --jitconfig "$J"`.
 2. **`launch` is the privilege boundary.** The sudoers rule lets `_ghrctl` run exactly that one
-   path as `ghr`; it re-validates class, slot range, stdin shape and a digest-pinned image.
+   path as `ghr`; it re-validates class, slot range, stdin shape and an immutable image reference
+   (`repo@sha256:<digest>` or a local image ID `sha256:<64 hex>`; tags and a leading `-` are refused).
 3. **Label policy is centralised in `mint-jit.sh`**: hosted labels refused first, then
    `ALLOWED_LABELS` (empty = refuse everything), then a JSON-safe charset. Name regex is anchored.
 4. **Two Apps, two keys, two accounts.** Runner App (mint/delete runners) and state App (variables +
