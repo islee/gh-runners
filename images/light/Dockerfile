@@ -20,9 +20,12 @@ FROM ghcr.io/actions/actions-runner@sha256:4ffadc0002b2581327e06101fc8c06cd18923
 # Bump here (see README). NODE_DEFAULT must be one of NODE_VERSIONS.
 ARG NODE_VERSIONS="20.20.2 22.23.3 24.22.0"
 ARG NODE_DEFAULT="22.23.3"
-ARG DENO_VERSION="2.9.7"
-# Optional extra pin for the deno zip; the published .sha256sum is always checked as well.
-ARG DENO_SHA256=""
+# Current 2.x plus 2.6.8, the version the workflows pin; each is verified against its published .sha256sum.
+ARG DENO_VERSIONS="2.9.7 2.6.8"
+# <python-version>-<release-tag>|<sha256> of the actions/python-versions ubuntu-24.04 arm64 builds,
+# installed with each release's own setup.sh into the layout actions/setup-python searches
+# ($TOOLCACHE/Python/<exact-version>/arm64 + arm64.complete).
+ARG PYTHON_SPECS="3.11.17-36876195594|a7a7bb9e6b50483f393d1c44c87aa87677a0464a9e3b07f33ee5b31ce155c6ef 3.12.15-36805895057|c537f7852633f9a6d909181528e263087ad815cc44d52ed226992b70b2648f44 3.13.16-36805956071|0e923697b278f1a21ac403838a4238b659200726d8983c3f271a120e76090f0e"
 ARG TC_ARCH="arm64"
 ARG NODE_ARCH="arm64"
 ARG DENO_TARGET="aarch64-unknown-linux-gnu"
@@ -36,7 +39,7 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 # Hosted-parity apt baseline + gh from GitHub's signed apt repo.
 RUN DEBIAN_FRONTEND=noninteractive apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        git curl ca-certificates gnupg jq unzip zip xz-utils zstd \
+        git curl ca-certificates gnupg jq unzip zip xz-utils zstd bc \
         python3 python3-venv python3-pip build-essential libatomic1 postgresql-client \
     && install -d -m 0755 /etc/apt/keyrings \
     && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg -o /etc/apt/keyrings/githubcli-archive-keyring.gpg \
@@ -65,24 +68,36 @@ RUN set -eu; \
         tar -xJf "${tmp}/${tarball}" --strip-components=1 -C "${dest}"; \
         touch "${tc}/node/${v}/${TC_ARCH}.complete"; \
     done; \
-    deno_url="https://github.com/denoland/deno/releases/download/v${DENO_VERSION}/deno-${DENO_TARGET}.zip"; \
-    curl -fsSL "${deno_url}" -o "${tmp}/deno.zip"; \
-    curl -fsSL "${deno_url}.sha256sum" -o "${tmp}/deno.zip.sha256sum"; \
-    deno_expected="$(cut -d' ' -f1 "${tmp}/deno.zip.sha256sum")"; \
-    test -n "${deno_expected}"; \
-    echo "${deno_expected}  ${tmp}/deno.zip" | sha256sum -c -; \
-    if [ -n "${DENO_SHA256}" ]; then echo "${DENO_SHA256}  ${tmp}/deno.zip" | sha256sum -c -; fi; \
-    deno_dest="${tc}/deno/${DENO_VERSION}/${TC_ARCH}"; \
-    mkdir -p "${deno_dest}"; \
-    unzip -q "${tmp}/deno.zip" -d "${deno_dest}"; \
-    chmod 0755 "${deno_dest}/deno"; \
-    touch "${tc}/deno/${DENO_VERSION}/${TC_ARCH}.complete"; \
+    for dv in ${DENO_VERSIONS}; do \
+        deno_url="https://github.com/denoland/deno/releases/download/v${dv}/deno-${DENO_TARGET}.zip"; \
+        curl -fsSL "${deno_url}" -o "${tmp}/deno-${dv}.zip"; \
+        curl -fsSL "${deno_url}.sha256sum" -o "${tmp}/deno-${dv}.sha256sum"; \
+        deno_expected="$(cut -d' ' -f1 "${tmp}/deno-${dv}.sha256sum")"; \
+        test -n "${deno_expected}"; \
+        echo "${deno_expected}  ${tmp}/deno-${dv}.zip" | sha256sum -c -; \
+        deno_dest="${tc}/deno/${dv}/${TC_ARCH}"; \
+        mkdir -p "${deno_dest}"; \
+        unzip -q "${tmp}/deno-${dv}.zip" -d "${deno_dest}"; \
+        chmod 0755 "${deno_dest}/deno"; \
+        touch "${tc}/deno/${dv}/${TC_ARCH}.complete"; \
+    done; \
+    for spec in ${PYTHON_SPECS}; do \
+        rel="${spec%%|*}"; \
+        pysha="${spec#*|}"; \
+        pyver="${rel%%-*}"; \
+        curl -fsSL "https://github.com/actions/python-versions/releases/download/${rel}/python-${pyver}-linux-24.04-arm64.tar.gz" -o "${tmp}/py-${pyver}.tgz"; \
+        echo "${pysha}  ${tmp}/py-${pyver}.tgz" | sha256sum -c -; \
+        mkdir -p "${tmp}/py-${pyver}"; \
+        tar -xzf "${tmp}/py-${pyver}.tgz" -C "${tmp}/py-${pyver}"; \
+        env -C "${tmp}/py-${pyver}" bash ./setup.sh > /dev/null; \
+        test -e "${tc}/Python/${pyver}/${TC_ARCH}.complete"; \
+    done; \
     for b in node npm npx corepack; do \
         test -e "${tc}/node/${NODE_DEFAULT}/${TC_ARCH}/bin/${b}"; \
         ln -sf "${tc}/node/${NODE_DEFAULT}/${TC_ARCH}/bin/${b}" "/usr/local/bin/${b}"; \
     done; \
     chown -R 1001 "${tc}"; \
     rm -rf "${tmp}"; \
-    node --version; npm --version; "${deno_dest}/deno" --version
+    node --version; npm --version; "${tc}/deno/${DENO_VERSIONS%% *}/${TC_ARCH}/deno" --version
 
 USER 1001

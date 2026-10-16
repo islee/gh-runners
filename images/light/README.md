@@ -11,18 +11,18 @@ resolve as cache hits.
 
 - Base: official runner image, pinned by digest (Ubuntu 24.04, user `runner` uid 1001).
 - apt: git curl ca-certificates gnupg jq unzip zip xz-utils zstd python3 python3-venv python3-pip
-  build-essential libatomic1 postgresql-client, plus `gh` from GitHub's signed apt repo.
+  build-essential libatomic1 postgresql-client bc, plus `gh` from GitHub's signed apt repo.
 - `AGENT_TOOLSDIRECTORY=/opt/hostedtoolcache` (the runner exports it as `RUNNER_TOOL_CACHE`),
-  owned by uid 1001, holding Node 20.20.2 / 22.23.3 / 24.22.0 and Deno (see `Dockerfile` ARGs).
+  owned by uid 1001, holding Node 20.20.2 / 22.23.3 / 24.22.0, Deno 2.9.7 and 2.6.8, and Python 3.11 / 3.12 / 3.13
+  (see `Dockerfile` ARGs).
 - Node 22 on the default PATH (`/usr/local/bin/{node,npm,npx,corepack}` symlinks), like hosted.
 - Not included: Playwright system deps (a later variant).
 
 ## Bumping versions
 
-Edit the `ARG` defaults in `Dockerfile` (`NODE_VERSIONS`, `NODE_DEFAULT`, `DENO_VERSION`, and the
+Edit the `ARG` defaults in `Dockerfile` (`NODE_VERSIONS`, `NODE_DEFAULT`, `DENO_VERSIONS`, and the
 base image digest), rebuild, and update `LIGHT_IMAGE`. Node tarballs are verified against the
-per-release `SHASUMS256.txt`; Deno against its published `.sha256sum` (add `--build-arg
-DENO_SHA256=...` for an independent pin). `setup-node: 22` only hits the cache while it resolves to
+per-release `SHASUMS256.txt`; Deno against its published `.sha256sum`; Python builds (actions/python-versions, ubuntu-24.04 arm64) against pinned sha256 values in `PYTHON_SPECS`. `setup-node: 22` only hits the cache while it resolves to
 a cached exact version, so bump the list when a new minor ships.
 
 ## Building

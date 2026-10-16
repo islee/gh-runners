@@ -20,9 +20,9 @@ setup() { slots_setup; }
 
 @test "Dockerfile: .complete markers are created for node and deno in the tool-cache layout" {
   grep -Fq 'touch "${tc}/node/${v}/${TC_ARCH}.complete"' "$(DOCKERFILE)"
-  grep -Fq 'touch "${tc}/deno/${DENO_VERSION}/${TC_ARCH}.complete"' "$(DOCKERFILE)"
+  grep -Fq 'touch "${tc}/deno/${dv}/${TC_ARCH}.complete"' "$(DOCKERFILE)"
   grep -Fq 'dest="${tc}/node/${v}/${TC_ARCH}"' "$(DOCKERFILE)"
-  grep -Fq 'deno_dest="${tc}/deno/${DENO_VERSION}/${TC_ARCH}"' "$(DOCKERFILE)"
+  grep -Fq 'deno_dest="${tc}/deno/${dv}/${TC_ARCH}"' "$(DOCKERFILE)"
 }
 
 @test "Dockerfile: every download is checksum-verified before extraction" {
@@ -54,7 +54,7 @@ setup() { slots_setup; }
 @test "Dockerfile: default node versions and arm64 arch are build ARGs" {
   grep -q '^ARG NODE_VERSIONS="20.20.2 22.23.3 24.22.0"' "$(DOCKERFILE)"
   grep -q '^ARG NODE_DEFAULT="22.23.3"' "$(DOCKERFILE)"
-  grep -q '^ARG DENO_VERSION=' "$(DOCKERFILE)"
+  grep -q '^ARG DENO_VERSIONS="2.9.7 2.6.8"' "$(DOCKERFILE)"
   grep -q '^ARG TC_ARCH="arm64"' "$(DOCKERFILE)"
 }
 
@@ -129,4 +129,14 @@ SHIM
   kill "$writer" 2> /dev/null || true
   [ "$status" -eq 0 ]
   [ ! -s "$W/stdin.seen" ]
+}
+
+@test "light Dockerfile: bc, deno 2.6.8 and python 3.11/3.12/3.13 (checksum-pinned, setup.sh layout)" {
+  grep -qw 'bc' "$(DOCKERFILE)"
+  grep -q '2\.6\.8' "$(DOCKERFILE)"
+  for py in 3.11 3.12 3.13; do grep -q "$py\.[0-9]*-[0-9]*|[0-9a-f]\{64\}" "$(DOCKERFILE)"; done
+  # each python tarball is verified before extraction, then installed by the release's setup.sh
+  grep -q 'echo "${pysha}  ${tmp}/py-${pyver}.tgz" | sha256sum -c -' "$(DOCKERFILE)"
+  grep -q 'env -C "${tmp}/py-${pyver}" bash ./setup.sh' "$(DOCKERFILE)"
+  grep -q 'Python/${pyver}/${TC_ARCH}.complete' "$(DOCKERFILE)"
 }
