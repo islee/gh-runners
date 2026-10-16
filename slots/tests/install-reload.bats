@@ -1,4 +1,5 @@
 #!/usr/bin/env bats
+# shellcheck disable=SC2034  # globals consumed by the sourced script under test
 # Re-running install.sh while slot daemons are mid-job (normal during upgrades): unchanged plist ->
 # SIGTERM only; changed plist + idle -> bootout/bootstrap; changed plist + busy -> deferred to a
 # one-shot helper (reload-slot.sh) that re-bootstraps once the old process is gone. launchctl is a
