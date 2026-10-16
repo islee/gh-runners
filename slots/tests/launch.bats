@@ -79,6 +79,27 @@ launch() { printf '%s\n' "$JIT_BLOB" | bash "$SLOTS_DIR/launch.sh" "$@"; }
   [ ! -s "$LIMA_LOG" ]
 }
 
+@test "image: accepted forms are repo@sha256:<digest> and a bare local image ID sha256:<64hex>" {
+  source "$SLOTS_DIR/launch.sh"
+  h=$(printf 'b%.0s' $(seq 1 64))
+  launch_validate_image "ghcr.io/actions/actions-runner@sha256:$h"
+  launch_validate_image "ghr/light@sha256:$h"
+  launch_validate_image "sha256:$h"
+  for bad in "" "sha256:abc" "sha256:${h}0" "SHA256:$h" "-sha256:$h" "--privileged@sha256:$h" \
+      "ghr/light:latest" "ghr/light:2026-10-16" "ghr/light" "ghr/light@sha256:abc" \
+      "sha256:$h extra" "x@sha256:$h;id" "-x@sha256:$h" " sha256:$h"; do
+    refute launch_validate_image "$bad"
+  done
+}
+
+@test "a local image ID is passed to docker run unchanged" {
+  h=$(printf 'c%.0s' $(seq 1 64))
+  sed -i.bak "s#^LIGHT_IMAGE=.*#LIGHT_IMAGE=sha256:$h#" "$W/slots.env"
+  run launch light 1
+  [ "$status" -eq 0 ]
+  grep -q -e "--cpus 2 sha256:$h bash -c" "$LIMA_LOG"
+}
+
 @test "no non-piping limactl call inherits stdin: extra bytes behind the JIT are never swallowed" {
   FAKE_POOL_STATUS=Stopped run bash -c "printf '%s\nEXTRA-STDIN\n' '$JIT_BLOB' | bash '$SLOTS_DIR/launch.sh' light 1"
   [ "$status" -eq 0 ]

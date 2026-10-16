@@ -88,5 +88,5 @@ repos:
         name: slots behavioral tests (bats)
         entry: bash slots/tests/run-bats.sh
         language: system             # needs: bats-core + openssl + python3 (stdlib)
-        files: ^slots/
+        files: ^(slots|images)/
         pass_filenames: false
