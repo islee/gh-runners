@@ -1,4 +1,5 @@
 #!/usr/bin/env bats
+# shellcheck disable=SC2034  # globals consumed by the sourced script under test
 # Tests for slots/mint-jit.sh and slots/reconcile.sh: the label/name policy gate and the
 # exact-name stale-runner cleanup. Offline (curl shim).
 

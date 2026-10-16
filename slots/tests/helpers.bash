@@ -75,7 +75,8 @@ SHIM
 
 # route METHOD PATH STATUS BODY — register a canned GitHub response.
 route() {
-  local f="$FAKE_ROUTES/$1$(printf '%s' "$2" | tr '/' '_')"
+  local f
+  f="$FAKE_ROUTES/$1$(printf '%s' "$2" | tr '/' '_')"
   printf '%s\n%s\n' "$3" "$4" > "$f"
 }
 

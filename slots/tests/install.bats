@@ -91,7 +91,7 @@ PY
 
 @test "every script has a header and none enables xtrace (would leak the JIT config)" {
   for f in "$SLOTS_DIR"/*.sh "$SLOTS_DIR"/lib/*.sh; do
-    sed -n 2p "$f" | grep -q '^# ' 
+    sed -n 2p "$f" | grep -q '^# '
     refute grep -nE '^\s*set -[a-z]*x|set -o xtrace|bash -x' "$f"
   done
 }

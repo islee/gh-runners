@@ -1,4 +1,5 @@
 #!/usr/bin/env bats
+# shellcheck disable=SC2034  # globals consumed by the sourced script under test
 # Tests for slots/slot-loop.sh: backoff curve, state file, JIT hand-off (stdin only), failure
 # handling and SIGTERM semantics. sudo is a shim; reconcile/mint are replaced by stubs.
 
