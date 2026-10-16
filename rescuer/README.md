@@ -50,7 +50,12 @@ Worst-case rescue latency is about `MAX_WAIT_MIN + INTERVAL_SEC`.
    old, so a burst can queue a job behind a busy slot. A job waiting behind a ~10-minute job is not
    stranded. Rescuing it cancels and re-runs the whole run, repeating the jobs that already passed.
    Set it to the longest normal job on the pool plus a margin.
-3. `MAX_ATTEMPTS` (default 3) caps re-runs. If the pool reports healthy but its runners can't take
+3. **Liveness guard.** A job is rescued only if no job on the same label set *started* within the
+   last `MAX_WAIT_MIN`. A pool that is alive but saturated keeps starting jobs, so its queue is left
+   alone. The guard is per label set, so a dead class (for example all supabase slots) is still
+   rescued while the light class works. It can add up to one `MAX_WAIT_MIN` of delay when the pool
+   dies right after starting a job.
+4. `MAX_ATTEMPTS` (default 3) caps re-runs. If the pool reports healthy but its runners can't take
    the job, every re-run routes back to the pool. Past the cap the run is logged as `SKIP` and left
    for a human.
 
@@ -60,5 +65,14 @@ Worst-case rescue latency is about `MAX_WAIT_MIN + INTERVAL_SEC`.
    cancel.
 2. It re-runs the **whole** run, not just the failed jobs. Re-running only the cancelled jobs would
    reuse the routing job's earlier output and send them straight back to the dead pool.
-3. The healthcheck only proves that passes succeed. If the App is uninstalled from a repo, that repo
-   silently drops out of the scan, because the installation lists what it covers.
+3. After a cancel, a run is re-run only if it ended `cancelled`. A run that finished on its own in
+   the meantime is left alone. If the re-run can't happen yet (still cancelling, API error), it is
+   retried on later passes for up to an hour. That retry list is in memory, so a container restart
+   in that window leaves the run cancelled (the cancel is logged).
+4. A re-run attempt joins the workflow's `concurrency` group. With `cancel-in-progress`, re-running
+   an old commit's run can cancel a newer run in the same group. Stranding is rare, so this is
+   accepted, not handled.
+5. The healthcheck is refreshed only by a pass with zero errors, so a revoked key or lost
+   permission turns the container unhealthy. It can't see coverage, though: if the App is
+   uninstalled from a repo, that repo silently drops out of the scan, because the installation
+   lists what it covers.

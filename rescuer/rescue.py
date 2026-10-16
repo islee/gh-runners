@@ -118,84 +118,215 @@ def installation_repos(gh) -> list[str]:
     return sorted(repos)
 
 
+def _ts(value: str | None) -> datetime | None:
+    return datetime.fromisoformat(value.replace("Z", "+00:00")) if value else None
+
+
+def pool_labels(job: dict, prefix: str) -> tuple[str, ...]:
+    """The job's self-hosted labels, lowercased (GitHub matches labels case-insensitively)."""
+    return tuple(
+        sorted(
+            lb.lower()
+            for lb in job.get("labels") or []
+            if lb.lower().startswith(prefix)
+        )
+    )
+
+
+def live_labels(jobs: list[dict], prefix: str, window_s: float, now: datetime) -> set:
+    """Label sets the pool demonstrably served recently: some job on them STARTED within window_s.
+
+    WHY: a job queued past MAX_WAIT on a pool that is alive but saturated is not stranded; it will
+    start when a slot frees. Rescuing it would cancel healthy work in its run. Liveness is per label
+    set, so a dead class (all supabase slots down) is still rescued while the other class works.
+    """
+    alive = set()
+    for j in jobs:
+        labels, started = pool_labels(j, prefix), _ts(j.get("started_at"))
+        if labels and started and (now - started).total_seconds() <= window_s:
+            alive.add(labels)
+    return alive
+
+
 def stranded_jobs(
     jobs: list[dict], prefix: str, max_wait_s: float, now: datetime
 ) -> list[str]:
-    """Descriptions of jobs still queued on a `prefix*` label for longer than max_wait_s."""
+    """Descriptions of jobs still queued on a `prefix*` label for longer than max_wait_s.
+
+    NOTE: GitHub creates a job only once its `needs:` have finished (observed 2026-10-16), so
+    created_at is when it became runnable, not when the run started.
+    """
     out = []
     for j in jobs:
-        labels = j.get("labels") or []
-        if j.get("status") != "queued" or not any(
-            lb.startswith(prefix) for lb in labels
-        ):
+        labels = pool_labels(j, prefix)
+        if j.get("status") != "queued" or not labels:
             continue
-        created = datetime.fromisoformat(j["created_at"].replace("Z", "+00:00"))
-        waited = (now - created).total_seconds()
+        waited = (now - _ts(j["created_at"])).total_seconds()
         if waited > max_wait_s:
             out.append(f"{j['name']} ({int(waited // 60)} min on {','.join(labels)})")
     return out
 
 
-def rescue_run(gh, repo: str, run_id: int, sleep=time.sleep) -> bool:
-    """Cancel, wait until the run is completed (a run can't be re-run before that), re-run it all.
+def _http_detail(e: Exception) -> str:
+    if isinstance(e, urllib.error.HTTPError):
+        try:
+            body = e.read()[:200].decode(errors="replace").replace("\n", " ")
+        except Exception:  # noqa: BLE001
+            body = ""
+        return f"HTTP {e.code} {body}".strip()
+    if isinstance(e, subprocess.CalledProcessError):
+        return f"{e} {(e.stderr or b'')[:200].decode(errors='replace').strip()}"
+    return str(e)
+
+
+def _paged(gh, path: str, key: str, pages: int = 5) -> list[dict]:
+    out, page = [], 1
+    while page <= pages:
+        batch = gh.api("GET", f"{path}&per_page=100&page={page}").get(key, [])
+        out += batch
+        if len(batch) < 100:
+            return out
+        page += 1
+    log(
+        f"WARN {path}: more than {pages * 100} {key}; the rest are not scanned this pass"
+    )
+    return out
+
+
+def try_rerun(gh, repo: str, run_id: int) -> str:
+    """Re-run a run iff it ended CANCELLED. Returns "rerun", "wait" (not completed yet) or "done".
+
+    WHY check the conclusion: if the stranded job got a runner after all and the run finished
+    (success or failure) before our cancel landed, re-running it would repeat finished work.
+    """
+    run = gh.api("GET", f"/repos/{repo}/actions/runs/{run_id}")
+    if run.get("status") != "completed":
+        return "wait"
+    if run.get("conclusion") != "cancelled":
+        log(
+            f"  -> {repo} run {run_id} finished on its own ({run.get('conclusion')}); not re-running"
+        )
+        return "done"
+    gh.api("POST", f"/repos/{repo}/actions/runs/{run_id}/rerun")
+    log(f"  -> re-run {repo} run {run_id}")
+    return "rerun"
+
+
+def rescue_run(gh, repo: str, run_id: int, sleep=time.sleep) -> str:
+    """Cancel, wait (<= 2 min) for completed (a run can't be re-run before that), then re-run it all.
 
     WHY the whole run and not rerun-failed-jobs: the routing job already succeeded with the
     self-hosted label in its output; re-running only the cancelled jobs would reuse that output and
-    route them straight back to the dead pool.
+    route them straight back to the dead pool. Returns as try_rerun; "wait" = caller retries later.
     """
     try:
         gh.api("POST", f"/repos/{repo}/actions/runs/{run_id}/cancel")
     except urllib.error.HTTPError as e:
-        # 409 = already completed/cancelling; the re-run below still applies.
+        # 409 = already completed or cancelling; try_rerun decides from the conclusion.
         if e.code != 409:
             raise
     for _ in range(24):
-        if (
-            gh.api("GET", f"/repos/{repo}/actions/runs/{run_id}").get("status")
-            == "completed"
-        ):
-            break
+        state = try_rerun(gh, repo, run_id)
+        if state != "wait":
+            return state
         sleep(5)
-    gh.api("POST", f"/repos/{repo}/actions/runs/{run_id}/rerun")
-    return True
+    return "wait"
 
 
-def scan_once(gh, cfg: dict, now: datetime | None = None, sleep=time.sleep) -> int:
-    """One pass over all repos; returns the number of runs rescued (or that would be, on dry run)."""
+def scan_once(
+    gh, cfg: dict, pending: dict, now: datetime | None = None, sleep=time.sleep
+):
+    """One pass. Returns (rescued, errors).
+
+    pending: {(repo, run_id): first_seen_epoch} for runs we cancelled but could not re-run yet
+    (still cancelling, or the re-run call failed). Retried every pass for up to an hour.
+    NOTE: in memory only; a container restart between cancel and re-run loses it (logged at cancel).
+    """
     now = now or datetime.now(timezone.utc)
-    repos = cfg["repos"] or installation_repos(gh)
-    rescued = 0
+    rescued = errors = 0
+
+    for key, first in list(pending.items()):
+        repo, run_id = key
+        try:
+            state = try_rerun(gh, repo, run_id)
+            if state != "wait" or now.timestamp() - first > 3600:
+                if state == "wait":
+                    log(
+                        f"  -> GAVE UP on {repo} run {run_id}: still not completed after 1 h"
+                    )
+                    errors += 1
+                del pending[key]
+        except Exception as e:  # noqa: BLE001
+            log(f"  -> RETRY FAILED {repo} run {run_id}: {_http_detail(e)}")
+            errors += 1
+
+    try:
+        repos = cfg["repos"] or installation_repos(gh)
+    except Exception as e:  # noqa: BLE001
+        log(f"ERROR listing installation repos: {_http_detail(e)}")
+        return 0, errors + 1
+
+    # Phase 1: gather every active run's latest jobs (one bad repo/run must not stop the pass).
+    gathered, all_jobs = [], []
     for repo in repos:
-        runs = []
-        for status in ("queued", "in_progress"):
-            q = f"/repos/{repo}/actions/runs?status={status}&per_page=50"
-            runs += gh.api("GET", q).get("workflow_runs", [])
-        for run in runs:
-            q = f"/repos/{repo}/actions/runs/{run['id']}/jobs?filter=latest&per_page=100"
-            jobs = gh.api("GET", q).get("jobs", [])
-            stuck = stranded_jobs(jobs, cfg["prefix"], cfg["max_wait_s"], now)
-            if not stuck:
-                continue
-            attempt = int(run.get("run_attempt") or 1)
-            where = f"{repo} run {run['id']} attempt {attempt} ({run.get('name', '')})"
-            # CRITICAL: cap re-runs. If the pool's heartbeat says "ok" while its runners can't take the
-            # job (label mismatch, wedged runner), every re-run routes back to the pool; without a cap
-            # this would cancel and re-run the same run forever.
-            if attempt >= cfg["max_attempts"]:
-                log(
-                    f"SKIP {where}: stranded but already at attempt {attempt}: {'; '.join(stuck)}"
+        try:
+            runs = []
+            for status in ("queued", "in_progress"):
+                runs += _paged(
+                    gh, f"/repos/{repo}/actions/runs?status={status}", "workflow_runs"
                 )
-                continue
-            log(f"STRANDED {where}: {'; '.join(stuck)}")
-            rescued += 1
-            if cfg["dry_run"]:
-                continue
+        except Exception as e:  # noqa: BLE001
+            log(f"ERROR listing runs of {repo}: {_http_detail(e)}")
+            errors += 1
+            continue
+        for run in runs:
             try:
-                rescue_run(gh, repo, run["id"], sleep=sleep)
-                log(f"  -> cancelled + re-run {repo} run {run['id']}")
-            except Exception as e:  # noqa: BLE001 — one bad run must not stop the pass
-                log(f"  -> RESCUE FAILED {repo} run {run['id']}: {e}")
-    return rescued
+                q = f"/repos/{repo}/actions/runs/{run['id']}/jobs?filter=latest"
+                jobs = _paged(gh, q, "jobs")
+            except Exception as e:  # noqa: BLE001
+                log(f"ERROR listing jobs of {repo} run {run['id']}: {_http_detail(e)}")
+                errors += 1
+                continue
+            gathered.append((repo, run, jobs))
+            all_jobs += jobs
+
+    # Phase 2: decide. A label set the pool served recently is alive, so its queue is just a queue.
+    alive = live_labels(all_jobs, cfg["prefix"], cfg["max_wait_s"], now)
+    for repo, run, jobs in gathered:
+        stuck = [
+            desc
+            for j in jobs
+            if pool_labels(j, cfg["prefix"]) not in alive
+            for desc in stranded_jobs([j], cfg["prefix"], cfg["max_wait_s"], now)
+        ]
+        if not stuck or (repo, run["id"]) in pending:
+            continue
+        attempt = int(run.get("run_attempt") or 1)
+        where = f"{repo} run {run['id']} attempt {attempt} ({run.get('name', '')})"
+        # CRITICAL: cap re-runs. If the pool's heartbeat says "ok" while its runners can't take the
+        # job (label mismatch, wedged runner), every re-run routes back to the pool; without a cap
+        # this would cancel and re-run the same run forever.
+        if attempt >= cfg["max_attempts"]:
+            log(
+                f"SKIP {where}: stranded but already at attempt {attempt}: {'; '.join(stuck)}"
+            )
+            continue
+        log(f"STRANDED {where}: {'; '.join(stuck)}")
+        rescued += 1
+        if cfg["dry_run"]:
+            continue
+        try:
+            if rescue_run(gh, repo, run["id"], sleep=sleep) == "wait":
+                pending[(repo, run["id"])] = now.timestamp()
+                log(
+                    f"  -> cancelled {repo} run {run['id']}; re-run pending (not completed yet)"
+                )
+        except Exception as e:  # noqa: BLE001
+            log(f"  -> RESCUE FAILED {repo} run {run['id']}: {_http_detail(e)}")
+            errors += 1
+            # The cancel may have landed: retry the re-run (conclusion-checked) on later passes.
+            pending[(repo, run["id"])] = now.timestamp()
+    return rescued, errors
 
 
 def load_config(env=os.environ) -> dict:
@@ -215,6 +346,11 @@ def load_config(env=os.environ) -> dict:
         raise SystemExit("RESCUER_APP_ID / RESCUER_INSTALLATION_ID missing or invalid")
     if not cfg["prefix"]:
         raise SystemExit("LABEL_PREFIX must not be empty (it would match every job)")
+    cfg["prefix"] = cfg["prefix"].lower()
+    if cfg["max_wait_s"] <= 0 or cfg["max_attempts"] < 1 or cfg["interval"] < 0:
+        raise SystemExit(
+            "MAX_WAIT_MIN must be > 0, MAX_ATTEMPTS >= 1, INTERVAL_SEC >= 0"
+        )
     return cfg
 
 
@@ -227,19 +363,24 @@ def main() -> int:
         f"interval={cfg['interval']}s max_attempts={cfg['max_attempts']} "
         f"repos={' '.join(cfg['repos']) or '(installation)'} dry_run={cfg['dry_run']}"
     )
+    pending: dict = {}
     while True:
         try:
-            n = scan_once(gh, cfg)
-            log(f"pass ok: {n} run(s) {'would be ' if cfg['dry_run'] else ''}rescued")
-            # Healthcheck input: the container is healthy while this file is fresh.
-            with open(cfg["heartbeat_file"], "w") as f:
-                f.write(f"{int(time.time())}\n")
+            n, errors = scan_once(gh, cfg, pending)
+            verb = "would be rescued" if cfg["dry_run"] else "rescued"
+            log(
+                f"pass {'ok' if errors == 0 else 'DEGRADED'}: {n} run(s) {verb}, {errors} error(s)"
+            )
+            # Healthcheck input: refreshed only by a clean pass, so persistent errors (lost
+            # permission, revoked key) turn the container unhealthy.
+            if errors == 0:
+                with open(cfg["heartbeat_file"], "w") as f:
+                    f.write(f"{int(time.time())}\n")
         except Exception as e:  # noqa: BLE001 — keep looping; a stale heartbeat marks it unhealthy
-            log(f"pass FAILED: {e}")
-            if cfg["interval"] <= 0:
-                return 1
+            errors = 1
+            log(f"pass FAILED: {_http_detail(e)}")
         if cfg["interval"] <= 0:
-            return 0
+            return 1 if errors else 0
         time.sleep(cfg["interval"])
 
 

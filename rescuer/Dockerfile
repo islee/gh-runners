@@ -13,7 +13,7 @@ USER 65534:65534
 ENV HEARTBEAT_FILE=/tmp/rescuer.last-ok PYTHONUNBUFFERED=1
 
 # Healthy while the last successful pass is younger than 3 intervals (INTERVAL_SEC, default 300).
-HEALTHCHECK --interval=60s --timeout=5s --start-period=120s CMD \
+HEALTHCHECK --interval=60s --timeout=5s --start-period=300s CMD \
   python3 -c "import os,sys,time; i=int(os.environ.get('INTERVAL_SEC','300')); sys.exit(0 if time.time()-os.path.getmtime(os.environ['HEARTBEAT_FILE'])<3*max(i,60) else 1)"
 
 ENTRYPOINT ["python3", "/app/rescue.py"]
