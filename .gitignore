@@ -38,3 +38,4 @@ __pycache__/
 
 # Config templates are committed even though *.env is ignored.
 !config.example.env
+!rescuer.example.env

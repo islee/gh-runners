@@ -1,0 +1,20 @@
+# Example stack for an always-on host that is NOT the runner pool. Copy next to rescuer.env and the
+# App key (rescuer-app.pem, mode 0400, owned by the uid in `user:`), then: docker compose up -d --build
+services:
+  rescuer:
+    build: .
+    image: ghr-rescuer:local
+    container_name: ghr-rescuer
+    restart: unless-stopped
+    user: "1000:1000"            # owner of rescuer-app.pem on the host
+    env_file: rescuer.env
+    volumes:
+      - ./rescuer-app.pem:/run/secrets/rescuer-app.pem:ro
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 128m
+    logging:
+      driver: json-file
+      options: {max-size: "5m", max-file: "3"}

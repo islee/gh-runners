@@ -12,6 +12,7 @@
 #   hadolint          — Dockerfile lint
 #   ruff / ruff-format — broker Python lint + format
 #   broker-pytest     — broker unit tests
+#   rescuer-pytest    — rescuer/ stranded-run logic + JWT (offline, fake GitHub client)
 #   runner-selftest   — runner-loop.sh SELFTEST modes (light/supabase/ios) + bash -n on self-update.sh
 #   windows-ps        — PSScriptAnalyzer lint + runner-loop.ps1 SELFTEST (needs pwsh + PSScriptAnalyzer)
 #   runner-loop-bats  — light/runner-loop.sh behavioral tests (needs bats-core)
@@ -52,10 +53,10 @@ repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.6.9
     hooks:
-      - id: ruff                      # broker lint
-        files: ^broker/.*\.py$
-      - id: ruff-format               # broker format
-        files: ^broker/.*\.py$
+      - id: ruff                      # broker + rescuer lint
+        files: ^(broker|rescuer)/.*\.py$
+      - id: ruff-format               # broker + rescuer format
+        files: ^(broker|rescuer)/.*\.py$
 
   # ── Test ─────────────────────────────────────────────────────────────────
   - repo: local
@@ -65,6 +66,12 @@ repos:
         entry: bash -c 'cd broker && pytest -q'
         language: system             # needs: pip install -r broker/requirements-dev.txt
         files: ^broker/
+        pass_filenames: false
+      - id: rescuer-pytest
+        name: rescuer pytest
+        entry: python3 -m pytest -q rescuer/tests
+        language: system             # needs: pytest (broker dev deps) + openssl
+        files: ^rescuer/
         pass_filenames: false
       - id: runner-selftest
         name: runner-loop SELFTEST (light/supabase/ios)
