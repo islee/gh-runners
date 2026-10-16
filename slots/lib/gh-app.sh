@@ -75,19 +75,25 @@ print(v)
 ' "$1"
 }
 
-# gh_runners_tsv_from_json — runners list JSON on stdin -> TSV lines `id name status busy`.
+# gh_runners_tsv_from_json — runners list JSON on stdin -> TSV lines `id name status busy labels`.
+# labels = the CUSTOM labels only (read-only system labels such as self-hosted/OS/arch are not
+# controlled by whoever registers the runner), lowercased, sorted, comma-joined.
 # WHY sanitize: a runner name containing a tab/newline must not forge extra columns/rows; it
 # then simply fails the name regex and trips the tripwire.
 gh_runners_tsv_from_json() {
   python3 -I -c '
 import sys, json
+def clean(v):
+    v = str(v)
+    for ch in ("\t", "\n", "\r"):
+        v = v.replace(ch, "?")
+    return v
 d = json.load(sys.stdin)
 for r in d.get("runners", []):
-    name = str(r.get("name", ""))
-    for ch in ("\t", "\n", "\r"):
-        name = name.replace(ch, "?")
-    print("%s\t%s\t%s\t%s" % (r.get("id", ""), name, r.get("status", ""),
-                              "true" if r.get("busy") else "false"))
+    labels = sorted({clean(l.get("name", "")).lower() for l in r.get("labels", [])
+                     if l.get("type", "custom") != "read-only"})
+    print("%s\t%s\t%s\t%s\t%s" % (r.get("id", ""), clean(r.get("name", "")), r.get("status", ""),
+                                  "true" if r.get("busy") else "false", ",".join(labels)))
 '
 }
 
@@ -121,16 +127,29 @@ gh_app_init() {
   GH_APP_KEY=$3
   [[ "$GH_INSTALLATION_ID" =~ ^[0-9]+$ ]] || { ghr_log "ERROR invalid installation id"; return 1; }
   # Cache lives in the caller's home (0700 role-account dir), keyed by app id so two Apps
-  # never share a token.
-  GH_TOKEN_CACHE="${GH_CACHE_DIR:-${HOME:-/tmp}}/.ghr-token-${GH_APP_ID}"
+  # never share a token. WHY no /tmp fallback: a world-writable dir would let another local user
+  # pre-plant or read the cache.
+  local cache_dir="${GH_CACHE_DIR:-${HOME:-}}"
+  [[ "$cache_dir" == /* ]] || { ghr_log "ERROR HOME unset/relative: refusing to cache tokens"; return 1; }
+  GH_TOKEN_CACHE="$cache_dir/.ghr-token-${GH_APP_ID}"
 }
 
-# _gh_request BEARER METHOD PATH [JSON] — one curl call. Body to stdout, status via return:
+# _gh_request BEARER METHOD PATH [JSON] — one curl call, run in a subshell whose EXIT/TERM/INT
+# trap removes the 0700 temp dir holding the bearer (a plain trap here would clobber the caller's,
+# e.g. slot-loop's SIGTERM handler).
+_gh_request() { ( _gh_request_inner "$@" ); }
+
+# _gh_request_inner — body of _gh_request. Body to stdout, status via return:
 # 0 = 2xx, 4 = 404, 1 = anything else (body still printed, truncated message on stderr).
-_gh_request() {
+_gh_request_inner() {
   local bearer=$1 method=$2 path=$3 json=${4-}
-  local tmp code="" rc=0
+  # NOTE: tmp is deliberately NOT local: the EXIT trap fires after this function has returned.
+  local code="" rc=0
+  tmp=""
   tmp=$(umask 077; mktemp -d "${TMPDIR:-/tmp}/ghr.XXXXXX") || return 1
+  trap 'rm -rf "$tmp"' EXIT
+  trap 'exit 143' TERM
+  trap 'exit 130' INT
   # mktemp -d is 0700, so the files below are private to this user.
   printf 'header = "Authorization: Bearer %s"\n' "$bearer" > "$tmp/cfg"
   local args=(-sS --max-time 30 -X "$method" -K "$tmp/cfg"
@@ -144,7 +163,6 @@ _gh_request() {
   [ -f "$tmp/out" ] && cat "$tmp/out"
   local snippet=""
   [ -f "$tmp/out" ] && snippet=$(head -c 200 "$tmp/out" | tr '\n' ' ')
-  rm -rf "$tmp"
   if [ "$rc" -ne 0 ] || [ -z "$code" ]; then
     ghr_log "ERROR curl failed (rc=$rc) $method $path"
     return 1

@@ -75,7 +75,7 @@ setup() {
 
 @test "runners TSV: columns parsed, tab/newline in names neutralised" {
   out=$(printf '%s' '{"runners":[{"id":1,"name":"ghr-light-1","status":"online","busy":true},{"id":2,"name":"evil\tname\nx","status":"offline","busy":false}]}' | gh_runners_tsv_from_json)
-  [ "$(printf '%s\n' "$out" | sed -n 1p)" = "$(printf '1\tghr-light-1\tonline\ttrue')" ]
+  [ "$(printf '%s\n' "$out" | sed -n 1p)" = "$(printf '1\tghr-light-1\tonline\ttrue\t')" ]
   [ "$(printf '%s\n' "$out" | wc -l | tr -d ' ')" -eq 2 ]
   [ "$(printf '%s\n' "$out" | sed -n 2p | cut -f2)" = "evil?name?x" ]
 }
@@ -90,4 +90,34 @@ setup() {
   refute ghr_valid_runner_name $'ghr-light-1\n'
   refute ghr_valid_runner_name $'ghr-light-1\nghr-light-2'
   refute ghr_valid_runner_name "gh-runner-light-host-1"
+}
+
+@test "runners TSV: 5th column = custom labels, lowercased and sorted; read-only system labels ignored" {
+  out=$(printf '%s' '{"runners":[{"id":1,"name":"ghr-light-1","status":"online","busy":false,"labels":[{"name":"self-hosted","type":"read-only"},{"name":"macOS","type":"read-only"},{"name":"B-Label","type":"custom"},{"name":"ghr-light","type":"custom"}]}]}' | gh_runners_tsv_from_json)
+  [ "$(printf '%s' "$out" | cut -f5)" = "b-label,ghr-light" ]
+}
+
+@test "token cache: gh_app_init refuses when HOME is unset/empty/relative (no /tmp fallback)" {
+  HOME="" run gh_app_init 111 222 "$W/key.pem"
+  [ "$status" -ne 0 ]
+  unset HOME
+  run gh_app_init 111 222 "$W/key.pem"
+  [ "$status" -ne 0 ]
+  HOME="relative/dir" run gh_app_init 111 222 "$W/key.pem"
+  [ "$status" -ne 0 ]
+}
+
+@test "_gh_request: the temp dir holding the bearer is removed even if the request is killed" {
+  route_token
+  # curl shim that SIGTERMs its parent (the request subshell) mid-request
+  cat > "$FAKE_BIN/curl" <<'SHIM'
+#!/bin/bash
+kill -TERM "$PPID"
+sleep 1
+SHIM
+  gh_app_init 111 222 "$W/key.pem"
+  run _gh_request fakebearer GET /x
+  [ "$status" -ne 0 ]
+  run bash -c "ls -d '$W'/ghr.* 2>/dev/null"
+  [ -z "$output" ]
 }
