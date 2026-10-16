@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Template for dev.ghr.heartbeat: publishes SELF_HOSTED_STATE every 60 s as the _ghrstate role
+  account (state App only; it cannot mint runners). install.sh substitutes @LIBEXEC@
+  @STATE_HOME@ @LOGDIR@.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>dev.ghr.heartbeat</string>
+  <key>UserName</key>
+  <string>_ghrstate</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>@LIBEXEC@/heartbeat</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin</string>
+    <key>HOME</key>
+    <string>@STATE_HOME@</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StartInterval</key>
+  <integer>60</integer>
+  <key>StandardOutPath</key>
+  <string>@LOGDIR@/heartbeat.log</string>
+  <key>StandardErrorPath</key>
+  <string>@LOGDIR@/heartbeat.log</string>
+</dict>
+</plist>
