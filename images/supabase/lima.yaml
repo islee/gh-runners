@@ -1,0 +1,46 @@
+# lima.yaml — template for the supabase-class golden VM (ghr-supa-golden).
+#
+# Context: images/build-supabase.sh creates the golden from this file with
+#   limactl create --name ghr-supa-golden images/supabase/lima.yaml
+# and provisions it with provision.sh. Per-job VMs are APFS-CoW clones of the STOPPED golden
+# (slots/launch.sh), so everything that must be identical across jobs is baked in here and by
+# provision.sh. CPU/memory below are defaults; launch.sh overrides them per clone (SUPA_CPUS,
+# SUPA_MEM).
+#
+# WHY vz: Apple Virtualization.framework is the fast path on Apple Silicon and the only vmType
+# the clone/boot-in-seconds design was measured on.
+
+vmType: "vz"
+arch: "aarch64"
+
+cpus: 4
+memory: "4GiB"
+disk: "40GiB"
+
+# Ubuntu 24.04 (noble) arm64 cloud image.
+# NOTE: the "release" path moves with each Ubuntu point build; pin a dated release directory
+# (and add `digest:`) when you need a reproducible golden.
+images:
+  - location: "https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-arm64.img"
+    arch: "aarch64"
+
+# CRITICAL: no host mounts. Jobs run untrusted workflow code; the guest must not see the host
+# filesystem (the default Lima template mounts the host home directory).
+mounts: []
+
+# WHY ignore every guest port: Lima would otherwise forward guest listeners (the Supabase stack
+# on 54321/54322, ...) to the HOST's 127.0.0.1. Up to three VMs run at once and would race for
+# the same host ports; the tests talk to 127.0.0.1 INSIDE the guest, so no forwarding is needed.
+portForwards:
+  - guestPortRange: [1, 65535]
+    ignore: true
+  - guestPortRange: [1, 65535]
+    proto: udp
+    ignore: true
+
+# No agent forwarding, no container runtimes: Docker CE is installed by provision.sh.
+ssh:
+  forwardAgent: false
+containerd:
+  system: false
+  user: false
