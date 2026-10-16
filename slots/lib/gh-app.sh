@@ -22,8 +22,7 @@ GH_API_BASE="${GH_API_BASE:-https://api.github.com}"
 GH_TOKEN_TTL="${GH_TOKEN_TTL:-3000}"
 
 # Runner naming convention. CRITICAL: anchored. Also checked against embedded newlines in
-# ghr_valid_runner_name because a bare `$` would accept "ghr-light-1\n" in some regex engines
-# (the broker needed the same fix: `\Z`).
+# ghr_valid_runner_name because a bare `$` would accept "ghr-light-1\n" in some regex engines.
 GHR_NAME_RE='^ghr-(light|supabase)-[0-9]+$'
 
 ghr_log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*" >&2; }
@@ -109,13 +108,13 @@ for r in d.get("runners", []):
 gh_b64url() { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
 
 # gh_app_jwt APP_ID KEY_PATH [NOW] — print an RS256 App JWT.
-# Claims mirror broker/app.py: iat = now-60 (clock skew), exp = now+540 (<10 min limit).
+# Claims: iat = now-60 (clock skew), exp = now+540 (<10 min limit).
 gh_app_jwt() {
   local app_id=$1 key=$2 now=${3:-}
   [ -n "$now" ] || now=$(date -u +%s)
   [[ "$app_id" =~ ^[A-Za-z0-9]+$ ]] || { ghr_log "ERROR invalid app id"; return 1; }
   [ -r "$key" ] || { ghr_log "ERROR app key not readable: $key"; return 1; }
-  # numeric app id -> JSON number (as the broker does); client-id strings (Iv...) -> JSON string
+  # numeric app id -> JSON number; client-id strings (Iv...) -> JSON string
   local iss="\"$app_id\""
   [[ "$app_id" =~ ^[0-9]+$ ]] && iss=$app_id
   local header payload sig

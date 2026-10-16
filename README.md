@@ -1,113 +1,78 @@
 # gh-runners
 
-Self-hosted **GitHub Actions runner** setups for a small, distributed CI fleet, **plus the token
-broker** that registers them. Every runner is **ephemeral** (re-registers after each job, no state
-bleeds between jobs) and **outbound-only** (polls GitHub — no inbound ports, no ingress). All of them
-use the **official first-party `actions/runner`** — no third-party runner images.
+A self-hosted **GitHub Actions runner pool on one Apple Silicon Mac**, with automatic fallback to
+GitHub-hosted runners. Every runner is a single-use **JIT** runner (one job, then gone), every job
+runs in a fresh container or VM, and the host is **outbound-only** (no inbound ports). Everything
+uses the first-party `actions/runner`. All org-specific values live in config files; nothing here is
+tied to one organization.
 
-Credentials are designed so **no runner host holds a standing GitHub admin credential**: the
-[`broker/`](broker/) service mints short-lived registration tokens from a GitHub App, and runners
-fetch one each cycle.
+## How it fits together
 
-> **Direction (in progress):** the [`slots/`](slots/) controller (org-level JIT runners, one launchd
-> daemon per slot, no broker) is the successor to the broker + systemd installers below. `broker/`
-> and the systemd-based `light/` / `supabase/` installers are **legacy-in-progress**: kept working
-> and documented, but new deployments should start from `slots/`.
+```
+ consumer repo workflow                       Mac (slots/)                          off-pool host (rescuer/)
+ ┌────────────────────────┐   repo variable   ┌──────────────────────────────┐     ┌──────────────────────────┐
+ │ pick job: reads         │◄─────────────────│ heartbeat: SELF_HOSTED_STATE │     │ every 5 min: jobs queued │
+ │ SELF_HOSTED_STATE       │                  │   ok@<ts>[/sat=…] | down@…   │     │ > 15 min on a pool label │
+ │ fresh ok -> pool label  │                  │ slot loops: mint JIT, run    │     │ -> cancel + re-run, so   │
+ │ else    -> ubuntu-latest│ ───jobs────────► │   1 job per container / VM   │     │ the pick job re-routes   │
+ └────────────────────────┘                  └──────────────────────────────┘     └──────────────────────────┘
+```
 
-## The broker (legacy-in-progress)
-
-[`broker/`](broker/) is a tiny FastAPI service that turns a GitHub App into short-lived runner
-registration tokens. Deploy it once (always-on), then point every runner at it via `BROKER_URL` +
-`BROKER_SECRET`. Deploy options: **Render** (root [`render.yaml`](render.yaml), `rootDir: broker`),
-or **Docker** ([`broker/docker-compose.yml`](broker/docker-compose.yml) / `broker/Dockerfile`). See
-[`broker/README.md`](broker/README.md).
-
-## Runner types
-
-| Dir | Workload | Runtime | Default labels |
-|-----|----------|---------|----------------|
-| [`slots/`](slots/) | Lint / unit (`light` class; `supabase` later) as a pool of single-use runners | macOS launchd **slot loops** + org **JIT** runner configs, containers inside a Lima VM, no broker | `ghr-light` (per `ALLOWED_LABELS`) |
-| [`light/`](light/) | Lint / unit / anything without Docker | Vanilla `actions/runner` + **systemd** (no Docker) | `self-hosted,linux,x64,light` |
-| [`supabase/`](supabase/) | Jobs that run a Docker stack (e.g. `supabase start`) | Vanilla `actions/runner` + **systemd**, on a host that has Docker | `self-hosted,linux,x64,supabase` |
-| [`android/`](android/) | Android E2E (emulator + Maestro) | **Docker** on the official `ghcr.io/actions/actions-runner` image, KVM-accelerated | `self-hosted,linux,x64,mobile,android` |
-| [`ios/`](ios/) | iOS E2E (+ Android-on-Mac) | Vanilla `actions/runner` + **launchd** (macOS, Apple Silicon) | `self-hosted,mobile,ios,android` |
-| [`windows/`](windows/) | Lint / unit / anything without Docker, on Windows | Vanilla `actions/runner` + **Task Scheduler** (native, no NSSM) | `self-hosted,windows,x64,light` |
-
-Each directory is **self-contained** — copy just the one you need onto its host and follow its README.
-`light/` and `supabase/` also ship an optional container-per-job variant under their `docker/`
-subdir (official `ghcr.io/actions/actions-runner` image) for hosts that want Docker isolation.
-
-### Naming
-
-Runners register as **`gh-runner-<type>-<id>-<n>`** — `<type>` is the runner type
-(`light`/`supabase`/`android`/`ios`), `<id>` identifies the host or user (defaults to the host short
-name; set with `--owner` on the installers or `OWNER` in compose), `<n>` is the instance number
-(auto from `--count` for systemd installs; `RUNNER_NUMBER` for the Docker variants). E.g. two light
-runners on host `my-host` register as `gh-runner-light-my-host-1` and `-2`. The name is **fixed
-per instance** — each ephemeral cycle re-registers it with `--replace`.
-
-> Why Docker only for android: the emulator wants a reproducible SDK/Maestro image and clean per-job
-> teardown. The others run jobs directly on the host, which is simpler and — for the `supabase` case —
-> actually avoids a networking workaround (a host-level runner sees `127.0.0.1` and bind paths
-> natively, with no `network_mode: host` hack).
-
-## Credential models
-
-Every runner accepts exactly one of three credentials (priority high → low):
-
-| Model | Variable(s) | Use when |
-|-------|-------------|----------|
-| **A — static token** | `RUNNER_TOKEN` | Quick one-off/pilot. A bare registration token **expires ~1h**, so it only survives the first registration of a re-registering runner. |
-| **B — broker** (recommended) | `BROKER_URL` + `BROKER_SECRET` | Fleet/unattended. No GitHub credential on the runner; the [`broker/`](broker/) holds the GitHub App key and mints fresh tokens each cycle. |
-| **B-JIT — broker JIT** | `BROKER_URL` + `BROKER_SECRET` + `USE_JIT=1` | `light/` runners only (opt-in, `--use-jit`). The broker mints a JIT runner config (`generate-jitconfig`) instead of a registration token — `run.sh --jitconfig` skips `config.sh`, GitHub auto-cleans the runner. **Labels are broker-enforced via `ALLOWED_LABELS`** (unlike the registration-token path). |
-| **C — PAT** | `ACCESS_TOKEN` | Unattended without a broker. A **fine-grained PAT scoped to `organization_self_hosted_runners` only** — the runner mints fresh registration tokens via the GitHub REST API each cycle. **Never an org-admin PAT.** |
-
-## Security model
-
-These runners execute code from GitHub Actions workflows on the host. Blast radius is bounded by:
-
-1. **Ephemeral** — every job runs on a freshly-registered runner; tokens/workspace/env don't persist.
-2. **No untrusted fork PRs** — wire the mobile/E2E jobs to trigger only on nightly `main` runs or an
-   explicit maintainer-applied label, never automatically on `pull_request` from forks.
-3. **Least-privilege credential** — the runner's credential can only manage runners, not read code or
-   secrets. Use model B or a scoped PAT; never paste an admin PAT.
-4. **Outbound-only** — runners poll GitHub; no inbound ports or ingress to expose.
-
-## Deployment env files
-
-Per-target env files at the repo root capture the config shared by everything on a given host.
-**Real ones are gitignored; `*.example` templates are committed** (rule: `.env*` is ignored except
-`.env*.example`).
-
-| File | Target | Holds |
-|------|--------|-------|
-| [`.env.render.example`](.env.render.example) | Render (the broker) | `GH_ORG`, GitHub App id/installation/key, `BROKER_SECRET` |
-| [`.env.pve.example`](.env.pve.example) | A Linux host (light/supabase/android) | `GH_ORG`, `BROKER_URL`, `BROKER_SECRET` |
-| [`.env.mac.example`](.env.mac.example) | A Mac (ios) | `GH_ORG`, `BROKER_URL`, `BROKER_SECRET`, labels, runner dir |
-
-Copy the relevant `.example` to its real name (e.g. `.env.pve`), fill it, and feed the values to the
-runner installer / compose / Render dashboard.
+1. **Routing** happens in the consumer repo. A small `pick` job reads the repo variable
+   `SELF_HOSTED_STATE` and returns the pool label (for example `ghr-light`) only if the value is a
+   fresh `ok` and that class isn't saturated; otherwise it returns `ubuntu-latest`. A dead pool
+   stops refreshing the variable, so jobs fall back to hosted runners within minutes without any
+   other moving part.
+2. **The pool** ([`slots/`](slots/)) runs one launchd loop per slot. Each loop mints a JIT runner
+   config through a GitHub App and starts one job, either in a container inside a long-lived Lima VM
+   (`light` class) or in a per-job Lima VM cloned from a golden image (`supabase` class). A heartbeat
+   daemon publishes the pool's state to every consumer repo.
+3. **The rescuer** ([`rescuer/`](rescuer/)) runs on a different always-on host. It catches the one
+   case routing can't: the pool dies *after* a job was routed to it. It cancels and re-runs such
+   runs so the `pick` job sends them to hosted runners.
 
 ## Layout
 
 ```
 gh-runners/
-├── broker/       # token broker (FastAPI): GitHub App → short-lived registration tokens  [legacy-in-progress]
-│                 #   Dockerfile, docker-compose.yml, tests/  (Render via root render.yaml)
-├── slots/        # macOS host: JIT slot loops + Lima pool + health heartbeat (successor to broker/ + systemd)
-│                 #   lib/, launchd/ templates, install.sh, tests/ (bats)
-├── light/        # Linux, systemd, no Docker        (+ docker/ container variant)  [legacy-in-progress]
-├── supabase/     # Linux, systemd, host has Docker   (+ docker/ container variant)  [legacy-in-progress]
-├── android/      # Docker (official ghcr.io/actions/actions-runner) + KVM emulator
-├── ios/          # macOS, launchd
-├── windows/      # Windows, native actions/runner + Task Scheduler
-├── rescuer/      # off-pool container: cancels + re-runs jobs stranded on self-hosted labels
-├── images/       # derived runner images: light (container) and supabase (Lima golden VM) + build scripts
-├── tests/        # Gate helpers: runner-loop.sh SELFTEST + self-update.sh syntax checks (slots/ has its own tests/)
-├── render.yaml   # Render Blueprint for broker/ (rootDir: broker)
-├── .env.{render,pve,mac}.example   # per-target env templates (real ones gitignored)
-├── README.md  LICENSE  .gitignore  .hadolint.yaml
+├── slots/        # macOS host: JIT slot loops, Lima pool, heartbeat, installer (+ tests/, bats)
+├── images/       # runner images: light (container, hosted-parity tool cache) and supabase (Lima golden VM)
+├── rescuer/      # off-pool container: cancels + re-runs jobs stranded on pool labels (+ tests/, pytest)
+├── requirements-dev.txt   # gate deps (pytest, ruff)
+├── .pre-commit-config.yaml  .hadolint.yaml  .github/   # gate = CI (same hooks)
+└── README.md  LICENSE  .gitignore
 ```
+
+Each directory has its own README with setup steps, key files and gotchas.
+
+## Credentials
+
+Three GitHub Apps, each with one narrow job, so no host holds a broad credential:
+
+| App role | Permissions | Held by | Used for |
+|---|---|---|---|
+| runner | org self-hosted runners: write | pool host, controller account | minting JIT runner configs, removing stale runners |
+| state | Actions variables: write; org self-hosted runners: read | pool host, heartbeat account | writing `SELF_HOSTED_STATE`, the foreign-runner tripwire |
+| rescuer | Actions: write | off-pool host (+ optional hosted backstop secret) | cancelling and re-running stranded runs |
+
+The two keys on the pool host belong to separate role accounts. Jobs run as a third account, inside
+a VM, with LAN egress blocked by pf.
+
+## Security model
+
+1. **Single-use runners.** A JIT runner takes exactly one job; its container or VM is destroyed
+   afterwards. Labels and runner group are fixed at mint time and checked against an allow-list.
+2. **Fail towards hosted.** Any doubt (stale heartbeat, stuck slot, a foreign or out-of-range runner
+   in the org) publishes `down`, and routing sends jobs to GitHub-hosted runners.
+3. **No secrets on argv.** JIT configs and tokens move through stdin and 0600 files only.
+4. **Outbound-only.** Runners poll GitHub; nothing listens on the host.
+5. **Don't route untrusted code here.** Fork PRs and other untrusted triggers belong on hosted runners.
+
+## History
+
+The previous generation (a FastAPI token broker on Render, systemd/launchd/Task Scheduler
+runner loops for Linux, macOS, Android and Windows, and a fleet self-update mechanism) was removed
+after tag [`legacy-fleet-final`](../../tree/legacy-fleet-final). Check out that tag to see it.
 
 ## License
 

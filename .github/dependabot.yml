@@ -1,5 +1,5 @@
 version: 2
-# Keeps the SHA-pinned GitHub Actions and the broker's Python deps current. Dependabot understands
+# Keeps the SHA-pinned GitHub Actions and the rescuer's base image current. Dependabot understands
 # SHA-pinned actions with a `# vX.Y.Z` comment and bumps both the SHA and the comment.
 #
 # NOTE: Dependabot has NO pre-commit ecosystem — it does not update .pre-commit-config.yaml hook
@@ -13,15 +13,9 @@ updates:
       actions:
         patterns: ["*"]
 
-  - package-ecosystem: pip
-    directory: /broker
-    schedule:
-      interval: weekly
-    groups:
-      broker-python:
-        patterns: ["*"]
-
+  # NOTE: images/light/Dockerfile is digest-pinned on purpose (rebuilt and loaded by an operator, see
+  # images/build-light.sh), so only the rescuer image is tracked here.
   - package-ecosystem: docker
-    directory: /broker
+    directory: /rescuer
     schedule:
       interval: weekly

@@ -394,3 +394,16 @@ def test_main_heartbeat_only_on_clean_pass(monkeypatch, tmp_path, errors, rc, fr
     monkeypatch.setattr(rescue, "scan_once", lambda gh, cfg, pending: (0, errors))
     assert rescue.main() == rc
     assert hb.exists() is fresh
+
+
+@pytest.mark.parametrize("age,rc", [(10, 0), (899, 0), (901, 1)])
+def test_healthcheck_freshness(tmp_path, age, rc):
+    hb = tmp_path / "hb"
+    hb.write_text("x")
+    mtime = hb.stat().st_mtime
+    env = {"HEARTBEAT_FILE": str(hb), "INTERVAL_SEC": "300"}
+    assert rescue.healthcheck(env, now=mtime + age) == rc
+
+
+def test_healthcheck_missing_file_is_unhealthy(tmp_path):
+    assert rescue.healthcheck({"HEARTBEAT_FILE": str(tmp_path / "none")}) == 1

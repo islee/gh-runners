@@ -354,7 +354,20 @@ def load_config(env=os.environ) -> dict:
     return cfg
 
 
+def healthcheck(env=os.environ, now: float | None = None) -> int:
+    """Docker HEALTHCHECK: 0 while the last clean pass is younger than 3 intervals (min 60 s)."""
+    now = time.time() if now is None else now
+    interval = max(int(env.get("INTERVAL_SEC", "300")), 60)
+    try:
+        age = now - os.path.getmtime(env.get("HEARTBEAT_FILE", "/tmp/rescuer.last-ok"))
+    except OSError:
+        return 1
+    return 0 if age < 3 * interval else 1
+
+
 def main() -> int:
+    if sys.argv[1:] == ["--healthcheck"]:
+        return healthcheck()
     cfg = load_config()
     gh = GitHub(cfg["app_id"], cfg["installation_id"], cfg["key_path"])
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))

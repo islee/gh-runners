@@ -1,10 +1,9 @@
 name: ci
 
 # Single source of truth: run the same pre-commit hooks CI and locally.
-# Hooks: shellcheck + hadolint + ruff (lint), broker pytest + runner-loop SELFTEST
-# (light/supabase/ios, + bash -n on self-update.sh) + windows-ps + runner-loop bats + slots bats (test),
-# detect-private-key + gitleaks (secret scan), plus YAML/whitespace hygiene. ubuntu-latest ships
-# pwsh; PSScriptAnalyzer + bats are installed pinned before the gate runs. See .pre-commit-config.yaml.
+# Hooks: shellcheck + hadolint + ruff (lint), rescuer pytest + slots bats (test),
+# detect-private-key + gitleaks (secret scan), plus YAML/whitespace hygiene. pytest and bats are
+# installed pinned before the gate runs. See .pre-commit-config.yaml.
 
 on:
   push:
@@ -25,11 +24,8 @@ jobs:
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.12"
-      - name: Install pre-commit + broker dev deps
-        run: pip install pre-commit -r broker/requirements-dev.txt
-      - name: Install PSScriptAnalyzer (windows gate)
-        shell: pwsh
-        run: Install-Module PSScriptAnalyzer -RequiredVersion 1.25.0 -Force -Scope CurrentUser
+      - name: Install pre-commit + dev deps
+        run: pip install pre-commit -r requirements-dev.txt
       - name: Install bats (pinned, matches local dev dep)
         # WHY a user prefix: the hosted image's global npm prefix (/usr/local) stopped being writable by the
         # runner user (EACCES on /usr/local/share/man/man7, 2026-10); a user prefix needs no sudo.
