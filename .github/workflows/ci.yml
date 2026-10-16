@@ -2,7 +2,7 @@ name: ci
 
 # Single source of truth: run the same pre-commit hooks CI and locally.
 # Hooks: shellcheck + hadolint + ruff (lint), broker pytest + runner-loop SELFTEST
-# (light/supabase/ios, + bash -n on self-update.sh) + windows-ps + runner-loop bats (test),
+# (light/supabase/ios, + bash -n on self-update.sh) + windows-ps + runner-loop bats + slots bats (test),
 # detect-private-key + gitleaks (secret scan), plus YAML/whitespace hygiene. ubuntu-latest ships
 # pwsh; PSScriptAnalyzer + bats are installed pinned before the gate runs. See .pre-commit-config.yaml.
 

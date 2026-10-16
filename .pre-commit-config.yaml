@@ -15,6 +15,7 @@
 #   runner-selftest   — runner-loop.sh SELFTEST modes (light/supabase/ios) + bash -n on self-update.sh
 #   windows-ps        — PSScriptAnalyzer lint + runner-loop.ps1 SELFTEST (needs pwsh + PSScriptAnalyzer)
 #   runner-loop-bats  — light/runner-loop.sh behavioral tests (needs bats-core)
+#   slots-bats        — slots/ controller behavioral tests (JWT, label guard, launch, heartbeat; needs bats-core)
 #   trailing-whitespace / end-of-file-fixer / check-yaml / check-merge-conflict — hygiene
 #   detect-private-key / gitleaks — secret scan
 
@@ -82,4 +83,10 @@ repos:
         entry: bash tests/run-bats.sh
         language: system             # needs: brew install bats-core | npm install -g bats@1.13.0
         files: ^(light/runner-loop\.sh|tests/.*\.bats|tests/run-bats\.sh)$
+        pass_filenames: false
+      - id: slots-bats
+        name: slots behavioral tests (bats)
+        entry: bash slots/tests/run-bats.sh
+        language: system             # needs: bats-core + openssl + python3 (stdlib)
+        files: ^slots/
         pass_filenames: false
