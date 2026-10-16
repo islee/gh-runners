@@ -15,7 +15,7 @@
 #
 # Dependencies: limactl (LIMACTL, default /usr/local/bin/limactl). bash 3.2 compatible. Every
 # non-piping limactl call gets `< /dev/null` (limactl shell would otherwise eat our stdin); the
-# one intentional pipe is provision.sh into `limactl shell`.
+# one intentional pipe copies provision.sh into the guest (`sudo tee`).
 
 set -euo pipefail
 
@@ -65,8 +65,12 @@ log "starting $GOLDEN (first boot takes a few minutes)"
 "$LIMACTL" start "$GOLDEN" --tty=false < /dev/null >&2 || die "limactl start failed"
 
 log "provisioning"
-# The script goes in on stdin on purpose; its stdout carries the PROVISION-OK line.
-out="$("$LIMACTL" shell "$GOLDEN" -- sudo bash -s < "$PROVISION")" || die "provisioning failed"
+# CRITICAL: the script is streamed to a FILE in the guest first and then run with stdin at
+# /dev/null. Feeding it to `bash -s` would let any child that reads stdin (installers, apt
+# scriptlets, `supabase init` prompts) swallow the rest of the script.
+"$LIMACTL" shell "$GOLDEN" -- sudo tee /root/ghr-provision.sh < "$PROVISION" > /dev/null || die "cannot copy provision.sh into $GOLDEN"
+out="$("$LIMACTL" shell "$GOLDEN" -- sudo bash /root/ghr-provision.sh < /dev/null)" || die "provisioning failed"
+"$LIMACTL" shell "$GOLDEN" -- sudo rm -f /root/ghr-provision.sh < /dev/null > /dev/null 2>&1 || true
 line="$(printf '%s\n' "$out" | grep '^PROVISION-OK ' | tail -1 || true)"
 [[ "$line" =~ ^PROVISION-OK\ ([0-9][0-9.]*)\ ([0-9][0-9.]*)$ ]] || die "provisioning did not report PROVISION-OK"
 runner_version="${BASH_REMATCH[1]}"

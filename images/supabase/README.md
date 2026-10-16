@@ -22,7 +22,9 @@ images/build-supabase.sh            # first build (first boot takes a few minute
 images/build-supabase.sh --rebuild  # replace an existing golden
 ```
 
-A failed build deletes the half-made golden, so slots refuse to start jobs instead of cloning it.
+The runner needs no `installdependencies.sh`: its .NET deps are installed explicitly and the final
+check is `Runner.Listener --version` as `runner`. `provision.sh` is copied into the guest as a file
+and run with stdin at `/dev/null`. A failed build deletes the half-made golden, so slots refuse to start jobs instead of cloning it.
 Running per-job VMs are unaffected by a rebuild only if no job is active: rebuild with the class
 idle.
 
@@ -31,9 +33,14 @@ idle.
 - Tool cache `/opt/hostedtoolcache` (`.complete` markers, checksum-verified): Node 20/22/24
   (22 on PATH), Deno 2.6.8 and current 2.x, Python 3.11/3.12/3.13 (`Python` tool, installed by the
   python-versions release's own `setup.sh`), Supabase CLI.
+- Every artifact is checked against a sha256 pinned in `provision.sh` (Node values from
+  `SHASUMS256.txt.asc` after a GPG check, Deno values = GitHub asset digests); the Docker and gh
+  apt keys by fingerprint; the Ubuntu cloud image by `digest` in `lima.yaml`.
 - `supabase/setup-cli@v1` does **not** consult the tool cache (it always downloads and prepends
   PATH), so the CLI entry in the cache is only used by provisioning.
-- The container images are pre-pulled from `ghcr.io`: setup-cli@v1 sets
+- The container images are pre-pulled from `ghcr.io` for each Postgres major in
+  `PREPULL_PG_MAJORS` (default `15 17`; `major_version` is set in a scratch project's
+  `config.toml`): setup-cli@v1 sets
   `SUPABASE_INTERNAL_IMAGE_REGISTRY=ghcr.io` for CLI versions below 2.108.0 and the CLI would
   otherwise pull `public.ecr.aws/...` names. Add registries via `PREPULL_REGISTRIES`. When the CLI
   version moves to 2.108.0 or later the default registry applies; rebuild with

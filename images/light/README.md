@@ -20,9 +20,10 @@ resolve as cache hits.
 
 ## Bumping versions
 
-Edit the `ARG` defaults in `Dockerfile` (`NODE_VERSIONS`, `NODE_DEFAULT`, `DENO_VERSIONS`, and the
-base image digest), rebuild, and update `LIGHT_IMAGE`. Node tarballs are verified against the
-per-release `SHASUMS256.txt`; Deno against its published `.sha256sum`; Python builds (actions/python-versions, ubuntu-24.04 arm64) against pinned sha256 values in `PYTHON_SPECS`. `setup-node: 22` only hits the cache while it resolves to
+Edit the `ARG` defaults in `Dockerfile` (`NODE_SPECS`, `NODE_DEFAULT`, `DENO_SPECS`, `PYTHON_SPECS`, and the
+base image digest), rebuild, and update `LIGHT_IMAGE`. Every artifact is verified against a sha256 pinned in the `ARG` (a checksum fetched from the same
+origin is not a pin): Node values come from `SHASUMS256.txt.asc` after checking its GPG signature
+against nodejs/release-keys, Deno values equal the GitHub release-asset digests; Python builds (actions/python-versions, ubuntu-24.04 arm64) against pinned sha256 values in `PYTHON_SPECS`. `setup-node: 22` only hits the cache while it resolves to
 a cached exact version, so bump the list when a new minor ships.
 
 ## Building

@@ -17,11 +17,15 @@
 # Pinned by digest: a mutable tag would let an upstream push change what runs with the JIT config.
 FROM ghcr.io/actions/actions-runner@sha256:4ffadc0002b2581327e06101fc8c06cd189232baf79fe561fac9caeb76f5e807
 
-# Bump here (see README). NODE_DEFAULT must be one of NODE_VERSIONS.
-ARG NODE_VERSIONS="20.20.2 22.23.3 24.22.0"
+# Bump here (see README). NODE_DEFAULT must be one of NODE_SPECS.
+# <version>|<sha256 of node-v<version>-linux-<arch>.tar.xz>, taken from nodejs.org SHASUMS256.txt.asc
+# after verifying its GPG signature against nodejs/release-keys. A checksum fetched from the same
+# origin as the artifact is not a pin, so the values live here.
+ARG NODE_SPECS="20.20.2|73093db209e4e9e09dd7d15a47aeaab1b74833830df03efa5f942a1122c5fa71 22.23.3|a44aeb94849a299b22df10b9e622ec2f605c2183501bc40590705131de7c740f 24.22.0|fef00bb4d36e1c50104a9775a10359beee98f162b4104dd12472c75065c6a143"
 ARG NODE_DEFAULT="22.23.3"
-# Current 2.x plus 2.6.8, the version the workflows pin; each is verified against its published .sha256sum.
-ARG DENO_VERSIONS="2.9.7 2.6.8"
+# <version>|<sha256 of deno-<target>.zip>: current 2.x plus 2.6.8 (the version the workflows pin).
+# Values equal the GitHub release-asset digests (`gh api repos/denoland/deno/releases/tags/v<ver>`).
+ARG DENO_SPECS="2.9.7|c832298b1ad4422481334855f6003e0f54145762c5a134f20a489511d2f65bbf 2.6.8|09a0a800be639986515540ddae2f2752625ed412f63d36c7152c2a72ee78c2d7"
 # <python-version>-<release-tag>|<sha256> of the actions/python-versions ubuntu-24.04 arm64 builds,
 # installed with each release's own setup.sh into the layout actions/setup-python searches
 # ($TOOLCACHE/Python/<exact-version>/arm64 + arm64.complete).
@@ -50,31 +54,27 @@ RUN DEBIAN_FRONTEND=noninteractive apt-get update \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-# Node (all NODE_VERSIONS) and Deno into the tool cache; checksums verified before extraction.
+# Node (all NODE_SPECS) and Deno into the tool cache; checksums verified before extraction.
 RUN set -eu; \
     tc="${AGENT_TOOLSDIRECTORY}"; \
     tmp="$(mktemp -d)"; \
     mkdir -p "${tc}/node" "${tc}/deno"; \
-    for v in ${NODE_VERSIONS}; do \
-        base="https://nodejs.org/dist/v${v}"; \
+    for nspec in ${NODE_SPECS}; do \
+        v="${nspec%%|*}"; \
+        nsha="${nspec#*|}"; \
         tarball="node-v${v}-linux-${NODE_ARCH}.tar.xz"; \
-        curl -fsSL "${base}/${tarball}" -o "${tmp}/${tarball}"; \
-        curl -fsSL "${base}/SHASUMS256.txt" -o "${tmp}/SHASUMS256-${v}.txt"; \
-        expected="$(grep " ${tarball}\$" "${tmp}/SHASUMS256-${v}.txt" | cut -d' ' -f1)"; \
-        test -n "${expected}"; \
-        echo "${expected}  ${tmp}/${tarball}" | sha256sum -c -; \
+        curl -fsSL "https://nodejs.org/dist/v${v}/${tarball}" -o "${tmp}/${tarball}"; \
+        echo "${nsha}  ${tmp}/${tarball}" | sha256sum -c -; \
         dest="${tc}/node/${v}/${TC_ARCH}"; \
         mkdir -p "${dest}"; \
         tar -xJf "${tmp}/${tarball}" --strip-components=1 -C "${dest}"; \
         touch "${tc}/node/${v}/${TC_ARCH}.complete"; \
     done; \
-    for dv in ${DENO_VERSIONS}; do \
-        deno_url="https://github.com/denoland/deno/releases/download/v${dv}/deno-${DENO_TARGET}.zip"; \
-        curl -fsSL "${deno_url}" -o "${tmp}/deno-${dv}.zip"; \
-        curl -fsSL "${deno_url}.sha256sum" -o "${tmp}/deno-${dv}.sha256sum"; \
-        deno_expected="$(cut -d' ' -f1 "${tmp}/deno-${dv}.sha256sum")"; \
-        test -n "${deno_expected}"; \
-        echo "${deno_expected}  ${tmp}/deno-${dv}.zip" | sha256sum -c -; \
+    for dspec in ${DENO_SPECS}; do \
+        dv="${dspec%%|*}"; \
+        dsha="${dspec#*|}"; \
+        curl -fsSL "https://github.com/denoland/deno/releases/download/v${dv}/deno-${DENO_TARGET}.zip" -o "${tmp}/deno-${dv}.zip"; \
+        echo "${dsha}  ${tmp}/deno-${dv}.zip" | sha256sum -c -; \
         deno_dest="${tc}/deno/${dv}/${TC_ARCH}"; \
         mkdir -p "${deno_dest}"; \
         unzip -q "${tmp}/deno-${dv}.zip" -d "${deno_dest}"; \
@@ -98,6 +98,6 @@ RUN set -eu; \
     done; \
     chown -R 1001 "${tc}"; \
     rm -rf "${tmp}"; \
-    node --version; npm --version; "${tc}/deno/${DENO_VERSIONS%% *}/${TC_ARCH}/deno" --version
+    node --version; npm --version; "${tc}/deno/${DENO_SPECS%%|*}/${TC_ARCH}/deno" --version
 
 USER 1001

@@ -17,12 +17,13 @@ cpus: 4
 memory: "4GiB"
 disk: "40GiB"
 
-# Ubuntu 24.04 (noble) arm64 cloud image.
-# NOTE: the "release" path moves with each Ubuntu point build; pin a dated release directory
-# (and add `digest:`) when you need a reproducible golden.
+# Ubuntu 24.04 (noble) arm64 cloud image, pinned to a dated release directory AND its sha256
+# (Lima verifies `digest` after download). To move to a newer image: take the new
+# release-YYYYMMDD directory and the matching line of its SHA256SUMS file.
 images:
-  - location: "https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-arm64.img"
+  - location: "https://cloud-images.ubuntu.com/releases/24.04/release-20260926/ubuntu-24.04-server-cloudimg-arm64.img"
     arch: "aarch64"
+    digest: "sha256:1d6bffe64b848468ac97f821d369a4846d983de1800ccf6b5ec8853e85cefc55"
 
 # CRITICAL: no host mounts. Jobs run untrusted workflow code; the guest must not see the host
 # filesystem (the default Lima template mounts the host home directory).
