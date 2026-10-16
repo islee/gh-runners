@@ -106,7 +106,7 @@ check_install_dirs() {
 install_script() {
   local s=$1 tmp
   case "$s" in
-    launch | pool)
+    launch | pool | reload-slot)
       if [ "$DRY" -eq 1 ]; then
         echo "DRY: install -m 0755 -o root -g wheel $SRC/$s.sh $LIBEXEC/$s (with GHR_INSTALLED=1)"
         return
@@ -143,7 +143,7 @@ slot_count() { config_int LIGHT_SLOTS 6 "$MAX_SLOTS"; }
 supa_count() { config_int SUPABASE_SLOTS 0 "$MAX_SUPA_SLOTS"; }
 
 # Source file -> installed name (".sh" stripped; launch.sh must become exactly `launch`).
-SCRIPTS="slot-loop mint-jit reconcile launch heartbeat pool"
+SCRIPTS="slot-loop mint-jit reconcile launch heartbeat pool reload-slot"
 
 ensure_account() {
   local name=$1 uid=$2
@@ -238,14 +238,19 @@ install_sudoers() {
   rm -f "$tmp"
 }
 
+# Seconds to wait for a booted-out daemon to disappear before treating it as busy (mid-job).
+UNLOAD_WAIT_SECS="${GHR_UNLOAD_WAIT:-30}"
+# Slot labels whose reload was handed to a helper because their job was still running.
+DEFERRED=""
+
 # wait_unloaded LABEL — bootout is asynchronous; bootstrapping before the old job is gone fails
 # with an I/O error. Bounded wait (30 s).
 wait_unloaded() {
   local label=$1 i=0
-  if [ "$DRY" -eq 1 ]; then echo "DRY: wait up to 30s until launchctl print system/$label fails"; return; fi
+  if [ "$DRY" -eq 1 ]; then echo "DRY: wait up to ${UNLOAD_WAIT_SECS}s until launchctl print system/$label fails"; return; fi
   while launchctl print "system/$label" > /dev/null 2>&1; do
     i=$((i + 1))
-    [ "$i" -le 30 ] || { echo "timeout waiting for $label to unload" >&2; return 1; }
+    [ "$i" -le "$UNLOAD_WAIT_SECS" ] || { echo "timeout waiting for $label to unload" >&2; return 1; }
     sleep 1
   done
 }
@@ -258,6 +263,60 @@ bootstrap_daemon() {
   run launchctl bootstrap system "$plist"
 }
 
+# schedule_reload LABEL PLIST — hand the (re)bootstrap of a busy slot to a one-shot LaunchDaemon
+# that waits for the old process to exit. See reload-slot.sh for why a launchd job.
+schedule_reload() {
+  local label=$1 plist=$2 slot hlabel hplist tmp
+  slot=${label#dev.ghr.slot.}
+  hlabel="dev.ghr.reload.$slot"
+  hplist="$ETC_DIR/reload/$hlabel.plist"
+  if launchctl print "system/$hlabel" > /dev/null 2>&1; then
+    say "reload helper $hlabel already pending"
+    return 0
+  fi
+  tmp=$(mktemp "${TMPDIR:-/tmp}/ghr-reload.XXXXXX")
+  render_plist "$SRC/launchd/dev.ghr.reload.plist" "$tmp" LABEL="$label" SLOT="$slot" DAEMON_PLIST="$plist" HELPER_PLIST="$hplist" LIBEXEC="$LIBEXEC" LOGDIR="$LOGDIR"
+  run plutil -lint "$tmp"
+  run install -d -m 0755 -o root -g wheel "$ETC_DIR/reload"
+  run install -m 0644 -o root -g wheel "$tmp" "$hplist"
+  rm -f "$tmp"
+  run launchctl bootstrap system "$hplist"
+}
+
+# report_deferred — the install still succeeds (exit 0) when slots were handed to reload helpers.
+report_deferred() {
+  if [ -n "$DEFERRED" ]; then
+    say "deferred: $DEFERRED (busy; will reload when their jobs finish)"
+  fi
+}
+
+# deploy_slot LABEL RENDERED PLIST — put a slot's plist in place and (re)load the daemon WITHOUT
+# ever failing the install because a job is running (re-installing during jobs is normal).
+#   unchanged plist + loaded : do not touch launchd registration; SIGTERM the loop so it finishes
+#                              (or releases an idle runner) and exits, and KeepAlive relaunches it
+#                              (ThrottleInterval 30 s) with the freshly installed scripts.
+#   changed plist / not loaded: install it, bootout, bounded wait, bootstrap. If the wait expires the
+#                              loop is finishing a job: DEFER to a helper instead of failing.
+deploy_slot() {
+  local label=$1 rendered=$2 plist=$3 changed=1 loaded=0
+  if [ -f "$plist" ] && cmp -s "$rendered" "$plist"; then changed=0; fi
+  if launchctl print "system/$label" > /dev/null 2>&1; then loaded=1; fi
+  if [ "$changed" -eq 0 ] && [ "$loaded" -eq 1 ]; then
+    say "$label: plist unchanged, signalling SIGTERM so it reloads the new scripts after its current job"
+    run launchctl kill SIGTERM "system/$label" || true
+    return 0
+  fi
+  run install -m 0644 -o root -g wheel "$rendered" "$plist"
+  run launchctl bootout "system/$label" 2> /dev/null || true
+  if wait_unloaded "$label"; then
+    run launchctl bootstrap system "$plist"
+  else
+    DEFERRED="${DEFERRED:+$DEFERRED }$label"
+    say "$label is busy (mid-job): deferring its reload to a helper"
+    schedule_reload "$label" "$plist"
+  fi
+}
+
 # install_slot_plists CLASS COUNT MAX TMP CTL_HOME — render + bootstrap dev.ghr.slot.<class>-1..COUNT
 # and remove any slot above COUNT (the class was shrunk or disabled, COUNT=0).
 install_slot_plists() {
@@ -267,8 +326,7 @@ install_slot_plists() {
     plist="$DAEMON_DIR/dev.ghr.slot.$class-$n.plist"
     render_plist "$SRC/launchd/dev.ghr.slot.plist" "$tmp/slot.plist" CLASS="$class" N="$n" LIBEXEC="$LIBEXEC" CTL_HOME="$ctl_home" LOGDIR="$LOGDIR"
     run plutil -lint "$tmp/slot.plist"
-    run install -m 0644 -o root -g wheel "$tmp/slot.plist" "$plist"
-    bootstrap_daemon "dev.ghr.slot.$class-$n" "$plist"
+    deploy_slot "dev.ghr.slot.$class-$n" "$tmp/slot.plist" "$plist"
     n=$((n + 1))
   done
   # CRITICAL: no `seq "$((count + 1))" "$max"`. BSD seq (macOS) counts DOWN when first > last, so at
@@ -312,6 +370,9 @@ do_uninstall() {
     run launchctl bootout "system/dev.ghr.slot.light-$n" 2> /dev/null || true
     run rm -f "$DAEMON_DIR/dev.ghr.slot.light-$n.plist"
   done
+  for n in $(seq 1 "$MAX_SLOTS"); do run launchctl bootout "system/dev.ghr.reload.light-$n" 2> /dev/null || true; done
+  for n in $(seq 1 "$MAX_SUPA_SLOTS"); do run launchctl bootout "system/dev.ghr.reload.supabase-$n" 2> /dev/null || true; done
+  run rm -rf "$ETC_DIR/reload"
   for n in $(seq 1 "$MAX_SUPA_SLOTS"); do
     run launchctl bootout "system/dev.ghr.slot.supabase-$n" 2> /dev/null || true
     run rm -f "$DAEMON_DIR/dev.ghr.slot.supabase-$n.plist"
@@ -364,6 +425,7 @@ main() {
   install_keys
   install_sudoers
   install_daemons
+  report_deferred
   say "done"
 }
 

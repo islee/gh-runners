@@ -26,6 +26,7 @@ LaunchDaemon dev.ghr.slot.light-N  (_ghrctl)        LaunchDaemon dev.ghr.heartbe
 | `pool.sh ensure\|rebuild` | `ghr` | Clone/start the Lima pool VM (`rebuild` is a stub) |
 | `heartbeat.sh` | `_ghrstate` | Computes the state (`down`, `ok`, `ok@<ts>/sat=<classes>`, `saturated`), writes the repo variable, runs the tripwire |
 | `install.sh` | root | Accounts, dirs, sudoers, scripts, config, plists; `--dry-run`, `--uninstall [--purge]` |
+| `reload-slot.sh` | root (one-shot LaunchDaemon) | Waits for a busy slot daemon to exit, then bootstraps its new plist (scheduled by `install.sh`) |
 | `launchd/*.plist` | root | Templates for slot / heartbeat / pool daemons (`@PLACEHOLDER@` rendered by install.sh) |
 | `config.example.env` | root | Template for `/usr/local/etc/ghr/slots.env` (no secrets) |
 | `../images/light/`, `../images/build-light.sh` | ghr | Derived runner image (hosted-parity tools + pre-warmed tool cache) and its Lima build script |
@@ -102,3 +103,9 @@ Operator clears a tripwire by deleting `/var/db/ghr/tripwire` after removing the
    60 s. Published as `ok@<ts>/sat=supabase` (sorted, comma-joined classes) when only some classes
    are saturated, plain `saturated@<ts>` only when every configured class is, `down@<ts>` beats
    everything. Consumers route a job to hosted when its label's class is listed in `sat=`.
+16. Re-running `install.sh` while jobs run is safe: a slot whose plist is unchanged only gets
+   `launchctl kill SIGTERM` (the loop finishes its job, KeepAlive relaunches it within the 30 s
+   ThrottleInterval with the new scripts). A changed plist is installed, booted out and, if the old
+   loop is still mid-job after 30 s, handed to a one-shot `dev.ghr.reload.<slot>` job
+   (`reload-slot.sh`, plist under `/usr/local/etc/ghr/reload`, waits up to 7 h) and reported as
+   `[install] deferred: ...` with exit 0.

@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Template for dev.ghr.reload.<slot>: one-shot handover job scheduled by install.sh when a slot
+  daemon could not be unloaded because it is mid-job. install.sh substitutes @LABEL@ (the slot's
+  launchd label), @SLOT@ (e.g. supabase-2), @DAEMON_PLIST@, @HELPER_PLIST@, @LIBEXEC@, @LOGDIR@.
+  Not installed in /Library/LaunchDaemons on purpose (see reload-slot.sh): no KeepAlive, so it runs
+  once and ends.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>dev.ghr.reload.@SLOT@</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>@LIBEXEC@/reload-slot</string>
+    <string>@LABEL@</string>
+    <string>@DAEMON_PLIST@</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>RELOAD_HELPER_PLIST</key>
+    <string>@HELPER_PLIST@</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>@LOGDIR@/reload.log</string>
+  <key>StandardErrorPath</key>
+  <string>@LOGDIR@/reload.log</string>
+</dict>
+</plist>
