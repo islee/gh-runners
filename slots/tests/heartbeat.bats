@@ -115,7 +115,7 @@ compute() { compute_state "$W/state" "${1:-$NOW}" "$RUNNERS" "$HB"; }
   [ "$(compute "$((NOW + 60))")" = "saturated" ]
   all_online                                       # one runner frees up
   [ "$(compute "$((NOW + 61))")" = "ok" ]
-  [ ! -e "$HB/all_busy_since" ]
+  [ ! -e "$HB/all_busy_since_light" ]
   all_busy
   [ "$(compute "$((NOW + 62))")" = "ok" ]          # the clock restarted
 }
@@ -256,4 +256,116 @@ compute() { compute_state "$W/state" "${1:-$NOW}" "$RUNNERS" "$HB"; }
   SUPABASE_LABELS="custom-supa"
   out=$(printf '%s\n' "$(printf '1\tghr-supabase-1\tonline\tfalse\tcustom-supa')" | tripwire_names)
   [ -z "$out" ]
+}
+
+# ── per-class saturation ──────────────────────────────────────────────────────
+
+# two_classes — light 3 slots + supabase 2 slots, all fresh. $1/$2 = busy flag per class.
+two_classes() {
+  SUPABASE_SLOTS=2
+  healthy_slots
+  for n in 1 2; do
+    printf '{"slot":"supabase-%s","class":"supabase","n":%s,"state":"registered","ts":%s,"since":%s,"last_exit":0}\n' "$n" "$n" "$((NOW - 5))" "$((NOW - 5))" > "$W/state/supabase-$n.json"
+  done
+  {
+    for n in 1 2 3; do printf '%s\tghr-light-%s\tonline\t%s\tghr-light\n' "$n" "$n" "$1"; done
+    for n in 1 2; do printf '%s\tghr-supabase-%s\tonline\t%s\tghr-supabase\n' "$((n + 3))" "$n" "$2"; done
+  } > "$RUNNERS"
+}
+
+@test "per-class: supabase busy + light free -> ok/sat=supabase only from 60 s on; resets when a slot frees" {
+  STALE_SECS=100000   # fixtures are not re-stamped as the fake clock advances
+  two_classes false true
+  [ "$(compute "$NOW")" = "ok" ]                       # clock starts
+  [ "$(compute "$((NOW + 59))")" = "ok" ]
+  [ "$(compute "$((NOW + 60))")" = "ok/sat=supabase" ]
+  [ -e "$HB/all_busy_since_supabase" ] && [ ! -e "$HB/all_busy_since_light" ]
+  # one supabase slot frees up: reset
+  printf '%s\n' "$(printf '1\tghr-light-1\tonline\tfalse\tghr-light')" "$(printf '2\tghr-light-2\tonline\tfalse\tghr-light')" "$(printf '3\tghr-light-3\tonline\tfalse\tghr-light')" "$(printf '4\tghr-supabase-1\tonline\ttrue\tghr-supabase')" "$(printf '5\tghr-supabase-2\tonline\tfalse\tghr-supabase')" > "$RUNNERS"
+  [ "$(compute "$((NOW + 61))")" = "ok" ]
+  [ ! -e "$HB/all_busy_since_supabase" ]
+  two_classes false true
+  [ "$(compute "$((NOW + 62))")" = "ok" ]              # the clock restarted
+  [ "$(compute "$((NOW + 122))")" = "ok/sat=supabase" ]
+}
+
+@test "per-class: light busy + supabase free -> ok/sat=light" {
+  two_classes true false
+  [ "$(compute "$NOW")" = "ok" ]
+  [ "$(compute "$((NOW + 60))")" = "ok/sat=light" ]
+}
+
+@test "per-class: both classes saturated -> plain 'saturated' (back-compat)" {
+  two_classes true true
+  [ "$(compute "$NOW")" = "ok" ]
+  [ "$(compute "$((NOW + 60))")" = "saturated" ]
+}
+
+@test "per-class: classes are timed independently" {
+  two_classes false true
+  [ "$(compute "$NOW")" = "ok" ]
+  two_classes true true                                 # light becomes busy 30 s later
+  [ "$(compute "$((NOW + 30))")" = "ok" ]
+  [ "$(compute "$((NOW + 60))")" = "ok/sat=supabase" ]  # supabase 60 s, light only 30 s
+  [ "$(compute "$((NOW + 90))")" = "saturated" ]
+}
+
+@test "per-class: a partially busy class is never saturated; down beats per-class saturation" {
+  STALE_SECS=100000
+  two_classes false true
+  printf '%s\n' "$(printf '1\tghr-light-1\tonline\tfalse\tghr-light')" "$(printf '2\tghr-light-2\tonline\tfalse\tghr-light')" "$(printf '3\tghr-light-3\tonline\tfalse\tghr-light')" "$(printf '4\tghr-supabase-1\tonline\ttrue\tghr-supabase')" "$(printf '5\tghr-supabase-2\tonline\tfalse\tghr-supabase')" > "$RUNNERS"
+  [ "$(compute "$NOW")" = "ok" ]
+  [ "$(compute "$((NOW + 300))")" = "ok" ]
+  two_classes false true
+  compute "$NOW" > /dev/null
+  STALE_SECS=120
+  slot 1 idle 500 5000                                  # a light slot stops writing
+  [ "$(compute "$((NOW + 600))")" = "down" ]
+}
+
+@test "published format: down@ts, ok@ts, ok@ts/sat=classes, saturated@ts (exact), tripwire forces down@" {
+  route_token
+  now=$(date -u +%s)
+  SUPABASE_SLOTS=2
+  printf 'SUPABASE_SLOTS=2\n' >> "$W/slots.env"
+  for c in light:3 supabase:2; do
+    cls=${c%%:*}; cnt=${c##*:}
+    for n in $(seq 1 "$cnt"); do
+      printf '{"slot":"%s-%s","class":"%s","n":%s,"state":"registered","ts":%s,"since":%s,"last_exit":0}\n' "$cls" "$n" "$cls" "$n" "$now" "$now" > "$W/state/$cls-$n.json"
+    done
+  done
+  runners_json() { # $1 light busy, $2 supabase busy
+    python3 - "$1" "$2" <<'PY'
+import json, sys
+lb, sb = sys.argv[1] == "true", sys.argv[2] == "true"
+r = [{"id": n, "name": "ghr-light-%d" % n, "status": "online", "busy": lb, "labels": [{"name": "ghr-light", "type": "custom"}]} for n in (1, 2, 3)]
+r += [{"id": 10 + n, "name": "ghr-supabase-%d" % n, "status": "online", "busy": sb, "labels": [{"name": "ghr-supabase", "type": "custom"}]} for n in (1, 2)]
+print(json.dumps({"runners": r}))
+PY
+  }
+  for repo in repo-a repo-b; do route PATCH /repos/test-org/$repo/actions/variables/SELF_HOSTED_STATE 204 ''; done
+  last_value() { grep '^BODY ' "$CURL_LOG" | tail -1 | sed -n 's/.*"value":"\([^"]*\)".*/\1/p'; }
+  # 1) nothing saturated
+  route GET /orgs/test-org/actions/runners 200 "$(runners_json false false)"
+  run bash "$SLOTS_DIR/heartbeat.sh"
+  [[ "$(last_value)" =~ ^ok@[0-9]+$ ]]
+  # 2) supabase saturated: pre-seed the class clock 61 s in the past so this run crosses the threshold
+  route GET /orgs/test-org/actions/runners 200 "$(runners_json false true)"
+  mkdir -p "$GHR_HB_ROOT/hb"; echo "$((now - 61))" > "$GHR_HB_ROOT/hb/all_busy_since_supabase"
+  : > "$CURL_LOG"
+  run bash "$SLOTS_DIR/heartbeat.sh"
+  [[ "$(last_value)" =~ ^ok@[0-9]+/sat=supabase$ ]]
+  # 3) both
+  route GET /orgs/test-org/actions/runners 200 "$(runners_json true true)"
+  echo "$((now - 61))" > "$GHR_HB_ROOT/hb/all_busy_since_light"
+  : > "$CURL_LOG"
+  run bash "$SLOTS_DIR/heartbeat.sh"
+  [[ "$(last_value)" =~ ^saturated@[0-9]+$ ]]
+  # 4) tripwire latch beats everything
+  echo latched > "$GHR_HB_ROOT/tripwire"
+  : > "$CURL_LOG"
+  run bash "$SLOTS_DIR/heartbeat.sh"
+  [[ "$(last_value)" =~ ^down@[0-9]+$ ]]
+  # both repos get the identical value
+  [ "$(grep -c '"value":"down@' "$CURL_LOG")" -eq 2 ]
 }

@@ -3,12 +3,19 @@
 #
 # Context: LaunchDaemon dev.ghr.heartbeat, user _ghrstate, every 60 s. Reads the slot state files
 # written by slot-loop.sh (read-only), asks GitHub which runners exist, computes one of
-#   ok        every slot fresh and none stuck
-#   saturated every slot busy for >= SATURATED_SECS (jobs would queue; callers may prefer hosted)
-#   down      anything else (missing/stale slot file, stuck slot, no slots configured)
-# and writes "<state>@<epoch>" to the repo variable SELF_HOSTED_STATE of each CONSUMER_REPOS repo
-# (PATCH, then POST on 404). pick-runner in the org's .github repo reads it and falls back to
-# hosted runners when it is not a fresh `ok`.
+#   down      anything else (missing/stale slot file, stuck slot, tripwire, no slots configured)
+#   ok        every slot fresh and none stuck, and no class saturated
+#   ok@<epoch>/sat=<c1>,<c2>
+#             as ok, but the listed classes (light|supabase, sorted) are SATURATED: every configured
+#             slot of that class has been busy for >= SATURATED_SECS, so a job for it would queue.
+#             Callers route jobs for a listed class to hosted runners and keep using other classes.
+#   saturated every configured class saturated (kept plain for back-compat consumers)
+# and writes the value to the repo variable SELF_HOSTED_STATE of each CONSUMER_REPOS repo (PATCH,
+# then POST on 404): "<down|ok|saturated>@<epoch>" or "ok@<epoch>/sat=<classes>". pick-runner in
+# the org's .github repo reads it and falls back to hosted runners when it is not a fresh `ok`
+# (or when the requested label's class is listed in sat=).
+# WHY per class: with both supabase slots busy and light slots idle, a fleet-wide "all busy" rule
+# never fired and supabase jobs queued on the mini instead of spilling to hosted runners.
 #
 # WHY repo-level variables: org variables don't reach private repos on GitHub Free.
 # WHY "stuck" uses GitHub runner status, not the job queue: the state App has no Actions:read, so
@@ -42,12 +49,15 @@ STATE_VAR_NAME="${STATE_VAR_NAME:-SELF_HOSTED_STATE}"
 state_field_num() { sed -n "s/.*\"$2\":\([0-9][0-9]*\).*/\1/p" "$1" | head -1; }
 state_field_str() { sed -n "s/.*\"$2\":\"\([a-z-]*\)\".*/\1/p" "$1" | head -1; }
 
-# compute_state STATE_DIR NOW RUNNERS_TSV HB_DIR — print ok|saturated|down.
-# Slot counts come from LIGHT_SLOTS / SUPABASE_SLOTS. HB_DIR keeps all_busy_since between runs so
-# "busy for > 60 s" survives the 60 s process lifetime.
+# compute_state STATE_DIR NOW RUNNERS_TSV HB_DIR — print the state WITHOUT the timestamp:
+#   down | ok | ok/sat=<classes> | saturated
+# Slot counts come from LIGHT_SLOTS / SUPABASE_SLOTS. HB_DIR keeps all_busy_since_<class> between
+# runs so "busy for >= 60 s" survives the 60 s process lifetime; the file is removed as soon as any
+# slot of that class is not busy.
 compute_state() {
   local dir=$1 now=$2 runners=$3 hb=$4
-  local class count n f ts since st name status busy total=0 busy_ct=0 first mark
+  local class count n f ts since st name status busy total=0 first mark
+  local busy_light=0 total_light=0 busy_supabase=0 total_supabase=0
   mkdir -p "$hb" 2> /dev/null
   for class in light supabase; do
     case $class in
@@ -88,20 +98,36 @@ compute_state() {
           ;;
         *) rm -f "$mark" ;;
       esac
-      [ "$busy" = "true" ] && busy_ct=$((busy_ct + 1))
+      case $class in
+        light) total_light=$((total_light + 1)); [ "$busy" = "true" ] && busy_light=$((busy_light + 1)) ;;
+        supabase) total_supabase=$((total_supabase + 1)); [ "$busy" = "true" ] && busy_supabase=$((busy_supabase + 1)) ;;
+      esac
       n=$((n + 1))
     done
   done
   [ "$total" -gt 0 ] || { echo down; return 0; }
-  if [ "$busy_ct" -eq "$total" ]; then
-    local first
-    first=$(cat "$hb/all_busy_since" 2> /dev/null || true)
-    if ! [[ "$first" =~ ^[0-9]+$ ]]; then first=$now; echo "$now" > "$hb/all_busy_since"; fi
-    if [ "$((now - first))" -ge "$SATURATED_SECS" ]; then echo saturated; return 0; fi
-  else
-    rm -f "$hb/all_busy_since"
+  # Per-class saturation: every configured slot of the class busy, continuously, for >= SATURATED_SECS.
+  local sat="" configured=0 nsat=0 tc bc
+  for class in light supabase; do
+    case $class in
+      light) tc=$total_light; bc=$busy_light ;;
+      supabase) tc=$total_supabase; bc=$busy_supabase ;;
+    esac
+    [ "$tc" -gt 0 ] || continue
+    configured=$((configured + 1))
+    mark="$hb/all_busy_since_$class"
+    if [ "$bc" -eq "$tc" ]; then
+      first=$(cat "$mark" 2> /dev/null || true)
+      if ! [[ "$first" =~ ^[0-9]+$ ]] || [ "$first" -gt "$now" ]; then first=$now; echo "$now" > "$mark"; fi
+      if [ "$((now - first))" -ge "$SATURATED_SECS" ]; then sat="${sat:+$sat,}$class"; nsat=$((nsat + 1)); fi
+    else
+      rm -f "$mark"
+    fi
+  done
+  if [ "$nsat" -eq 0 ]; then echo ok
+  elif [ "$nsat" -eq "$configured" ]; then echo saturated
+  else echo "ok/sat=$sat"
   fi
-  echo ok
 }
 
 # norm_labels STRING — comma/space separated labels -> lowercase, sorted, unique, comma-joined.
@@ -172,7 +198,7 @@ main() {
   if [ -e "$GHR_HB_ROOT/tripwire" ]; then state=down; ghr_log "tripwire latched: publishing down"; fi
   for repo in ${CONSUMER_REPOS//,/ }; do
     [[ "$repo" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] || { ghr_log "WARN skipping invalid repo: $repo"; rc=1; continue; }
-    write_state_var "$repo" "${state}@${now}" || { ghr_log "ERROR variable write failed: $repo"; rc=1; }
+    write_state_var "$repo" "${state%%/*}@${now}${state#"${state%%/*}"}" || { ghr_log "ERROR variable write failed: $repo"; rc=1; }
   done
   exit "$rc"
 }
