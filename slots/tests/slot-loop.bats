@@ -169,3 +169,34 @@ do_launch() { exec sleep 20; }' 1
   write_state idle
   [ -z "$(ls -A "$W/state")" ]
 }
+
+@test "supabase class: mint uses SUPABASE_LABELS (not the light labels)" {
+  source "$SLOTS_DIR/slot-loop.sh"   # restore the real do_mint (setup stubs it)
+  printf '#!/bin/bash\nprintf "%%s|" "$@"\n' > "$W/fakemint"; chmod +x "$W/fakemint"
+  sibling() { echo "$W/fakemint"; }
+  CLASS=supabase
+  SUPABASE_LABELS="ghr-supabase,extra-label"
+  [ "$(do_mint ghr-supabase-1)" = "ghr-supabase-1|ghr-supabase|extra-label|" ]
+  CLASS=light
+  LIGHT_LABELS="ghr-light"
+  [ "$(do_mint ghr-light-1)" = "ghr-light-1|ghr-light|" ]
+}
+
+@test "supabase class: slot-loop arg validation follows SUPABASE_SLOTS (default 0 = disabled)" {
+  run bash "$SLOTS_DIR/slot-loop.sh" supabase 1
+  [ "$status" -eq 2 ]
+  printf 'SUPABASE_SLOTS=2\n' >> "$W/slots.env"
+  run bash "$SLOTS_DIR/slot-loop.sh" supabase 3
+  [ "$status" -eq 2 ]
+  run bash "$SLOTS_DIR/slot-loop.sh" supabase 0
+  [ "$status" -eq 2 ]
+}
+
+@test "supabase class: a cycle hands the class and slot to launch (stdin-only JIT)" {
+  CLASS=supabase
+  N=1
+  FAKE_LAUNCH_RC=0 run_cycle
+  [ "$(cat "$SUDO_STDIN")" = "$JIT_BLOB" ]
+  [ "$(cat "$SUDO_ARGV")" = "$(printf -- '-n\n-u\nghr\n%s\nsupabase\n1' "$LAUNCH_BIN")" ]
+  [ -f "$W/state/supabase-1.json" ]
+}

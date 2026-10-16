@@ -8,27 +8,7 @@ JIT_BLOB="SECRETJITBLOB0123456789abcdef=="
 
 setup() {
   slots_setup
-  LIMA_LOG="$W/lima.log"
-  LIMA_STDIN="$W/lima.stdin"
-  : > "$LIMA_LOG"
-  LIMA_OTHER_STDIN="$W/lima.other.stdin"
-  : > "$LIMA_OTHER_STDIN"
-  export LIMA_LOG LIMA_STDIN LIMA_OTHER_STDIN GHR_POOL_LOCK="$W/pool.lock"
-  cat > "$FAKE_BIN/limactl" <<'SHIM'
-#!/bin/bash
-echo "$*" >> "$LIMA_LOG"
-# Every call that is NOT the docker run must have been given /dev/null as stdin; capture what it
-# could read so tests can prove it never swallowed the caller's stdin.
-case "$*" in *"docker run"*) ;; *) cat >> "$LIMA_OTHER_STDIN" ;; esac
-case "$*" in
-  "list "*) printf '%s' "${FAKE_POOL_STATUS-Running}" ;;
-  *dev/tcp*) exit "${FAKE_PROBE_RC:-1}" ;;
-  *"docker run"*) cat > "$LIMA_STDIN"; sleep "${FAKE_RUN_SLEEP:-0}"; exit "${FAKE_RUN_RC:-0}" ;;
-  *) exit 0 ;;
-esac
-SHIM
-  chmod +x "$FAKE_BIN/limactl"
-  export LIMACTL="$FAKE_BIN/limactl"
+  lima_setup
 }
 
 launch() { printf '%s\n' "$JIT_BLOB" | bash "$SLOTS_DIR/launch.sh" "$@"; }
@@ -65,6 +45,13 @@ launch() { printf '%s\n' "$JIT_BLOB" | bash "$SLOTS_DIR/launch.sh" "$@"; }
   refute grep -q "$JIT_BLOB" "$CURL_ARGV_LOG"
   grep -q 'docker run --rm -i --name ghr-light-2 --memory 2g --cpus 2 ghcr.io/actions/actions-runner@sha256:' "$LIMA_LOG"
   grep -q 'read -r J; exec ./run.sh --jitconfig "\$J"' "$LIMA_LOG"
+}
+
+@test "the JIT is in no limactl call's environment (light path)" {
+  run launch light 1
+  [ "$status" -eq 0 ]
+  [ -s "$LIMA_ENV" ]
+  refute grep -q "$JIT_BLOB" "$LIMA_ENV"
 }
 
 @test "the runner's exit code is propagated" {

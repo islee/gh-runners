@@ -10,7 +10,7 @@ container, and repeats. Everything org-specific comes from one config file; noth
 ```
 LaunchDaemon dev.ghr.slot.light-N  (_ghrctl)        LaunchDaemon dev.ghr.heartbeat (_ghrstate)
   slot-loop -> reconcile -> mint-jit                   reads slot state files + org runner list
-           -> sudo -u ghr launch  (JIT on stdin)       -> SELF_HOSTED_STATE = "<ok|saturated|down>@<epoch>"
+           -> sudo -u ghr launch  (JIT on stdin)       -> SELF_HOSTED_STATE = "<state>@<epoch>[/sat=<classes>]"
                 -> limactl shell ghr-pool -> docker run (JIT on stdin again)   (repo variable per consumer repo)
 ```
 
@@ -24,11 +24,12 @@ LaunchDaemon dev.ghr.slot.light-N  (_ghrctl)        LaunchDaemon dev.ghr.heartbe
 | `slot-loop.sh <class> <n>` | `_ghrctl` | Forever loop, state file, backoff 30 to 300 s, graceful SIGTERM |
 | `launch.sh <class> <n>` | `ghr` via sudo | Privilege boundary: validates args/stdin/image, pool ensure, LAN preflight, `docker run` |
 | `pool.sh ensure\|rebuild` | `ghr` | Clone/start the Lima pool VM (`rebuild` is a stub) |
-| `heartbeat.sh` | `_ghrstate` | Computes ok/saturated/down, writes the repo variable, runs the tripwire |
+| `heartbeat.sh` | `_ghrstate` | Computes the state (`down`, `ok`, `ok@<ts>/sat=<classes>`, `saturated`), writes the repo variable, runs the tripwire |
 | `install.sh` | root | Accounts, dirs, sudoers, scripts, config, plists; `--dry-run`, `--uninstall [--purge]` |
 | `launchd/*.plist` | root | Templates for slot / heartbeat / pool daemons (`@PLACEHOLDER@` rendered by install.sh) |
 | `config.example.env` | root | Template for `/usr/local/etc/ghr/slots.env` (no secrets) |
 | `../images/light/`, `../images/build-light.sh` | ghr | Derived runner image (hosted-parity tools + pre-warmed tool cache) and its Lima build script |
+| `../images/supabase/`, `../images/build-supabase.sh` | ghr | Golden VM for the supabase class (provision, tool cache, full Supabase image pre-pull) |
 | `tests/*.bats`, `tests/helpers.bash`, `tests/run-bats.sh` | CI | Offline suite; curl/limactl/sudo are shims |
 
 ## Patterns
@@ -92,3 +93,12 @@ Operator clears a tripwire by deleting `/var/db/ghr/tripwire` after removing the
    takes full effect only after a daemon restart.
 13. Role-account UIDs default to 451/452 (`GHRCTL_UID`/`GHRSTATE_UID` override) and the `sysadminctl
    -roleAccount` flags were not exercised on a real host by the test suite.
+14. supabase class: `SUPABASE_SLOTS=0` (default) disables it; at most 3. Each job clones the STOPPED
+   golden `ghr-supa-golden`, runs the runner natively in the VM and deletes the VM on every exit
+   path (success, failure, timeout, signal, preflight refusal). `launch` never starts, stops or
+   edits the golden; a missing or running golden is a refusal. Build it with
+   `images/build-supabase.sh`; the LAN preflight runs inside each VM.
+15. Saturation is per class: a class is saturated when ALL its configured slots have been busy for
+   60 s. Published as `ok@<ts>/sat=supabase` (sorted, comma-joined classes) when only some classes
+   are saturated, plain `saturated@<ts>` only when every configured class is, `down@<ts>` beats
+   everything. Consumers route a job to hosted when its label's class is listed in `sat=`.

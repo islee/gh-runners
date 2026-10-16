@@ -20,16 +20,18 @@ setup() { slots_setup; }
 
 @test "Dockerfile: .complete markers are created for node and deno in the tool-cache layout" {
   grep -Fq 'touch "${tc}/node/${v}/${TC_ARCH}.complete"' "$(DOCKERFILE)"
-  grep -Fq 'touch "${tc}/deno/${DENO_VERSION}/${TC_ARCH}.complete"' "$(DOCKERFILE)"
+  grep -Fq 'touch "${tc}/deno/${dv}/${TC_ARCH}.complete"' "$(DOCKERFILE)"
   grep -Fq 'dest="${tc}/node/${v}/${TC_ARCH}"' "$(DOCKERFILE)"
-  grep -Fq 'deno_dest="${tc}/deno/${DENO_VERSION}/${TC_ARCH}"' "$(DOCKERFILE)"
+  grep -Fq 'deno_dest="${tc}/deno/${dv}/${TC_ARCH}"' "$(DOCKERFILE)"
 }
 
 @test "Dockerfile: every download is checksum-verified before extraction" {
   # node tarball and deno zip each go through sha256sum -c
   [ "$(grep -c 'sha256sum -c -' "$(DOCKERFILE)")" -ge 3 ]
-  grep -q 'SHASUMS256' "$(DOCKERFILE)"
-  grep -q '\.sha256sum' "$(DOCKERFILE)"
+  # CRITICAL: pinned values in the file; a checksum fetched from the artifact's own origin is not a pin
+  refute grep -E 'SHASUMS256\.txt"|\.sha256sum"' "$(DOCKERFILE)"
+  grep -Eq '^ARG NODE_SPECS="20\.20\.2\|[0-9a-f]{64} 22\.23\.3\|[0-9a-f]{64} 24\.22\.0\|[0-9a-f]{64}"' "$(DOCKERFILE)"
+  grep -Eq '^ARG DENO_SPECS="2\.9\.7\|[0-9a-f]{64} 2\.6\.8\|09a0a800be639986515540ddae2f2752625ed412f63d36c7152c2a72ee78c2d7"' "$(DOCKERFILE)"
   # the verification of the node tarball precedes its extraction
   [ "$(grep -n 'sha256sum -c' "$(DOCKERFILE)" | head -1 | cut -d: -f1)" -lt "$(grep -n 'tar -xJf' "$(DOCKERFILE)" | head -1 | cut -d: -f1)" ]
 }
@@ -52,9 +54,9 @@ setup() { slots_setup; }
 }
 
 @test "Dockerfile: default node versions and arm64 arch are build ARGs" {
-  grep -q '^ARG NODE_VERSIONS="20.20.2 22.23.3 24.22.0"' "$(DOCKERFILE)"
+  grep -q '^ARG NODE_SPECS=' "$(DOCKERFILE)"
   grep -q '^ARG NODE_DEFAULT="22.23.3"' "$(DOCKERFILE)"
-  grep -q '^ARG DENO_VERSION=' "$(DOCKERFILE)"
+  grep -q '^ARG DENO_SPECS=' "$(DOCKERFILE)"
   grep -q '^ARG TC_ARCH="arm64"' "$(DOCKERFILE)"
 }
 
@@ -129,4 +131,14 @@ SHIM
   kill "$writer" 2> /dev/null || true
   [ "$status" -eq 0 ]
   [ ! -s "$W/stdin.seen" ]
+}
+
+@test "light Dockerfile: bc, deno 2.6.8 and python 3.11/3.12/3.13 (checksum-pinned, setup.sh layout)" {
+  grep -qw 'bc' "$(DOCKERFILE)"
+  grep -q '2\.6\.8' "$(DOCKERFILE)"
+  for py in 3.11 3.12 3.13; do grep -q "$py\.[0-9]*-[0-9]*|[0-9a-f]\{64\}" "$(DOCKERFILE)"; done
+  # each python tarball is verified before extraction, then installed by the release's setup.sh
+  grep -q 'echo "${pysha}  ${tmp}/py-${pyver}.tgz" | sha256sum -c -' "$(DOCKERFILE)"
+  grep -q 'env -C "${tmp}/py-${pyver}" bash ./setup.sh' "$(DOCKERFILE)"
+  grep -q 'Python/${pyver}/${TC_ARCH}.complete' "$(DOCKERFILE)"
 }

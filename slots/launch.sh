@@ -1,5 +1,6 @@
 #!/bin/bash
-# launch.sh <class> <n> — run ONE ephemeral runner container for slot <class>-<n>.
+# launch.sh <class> <n> — run ONE ephemeral runner for slot <class>-<n> (light: container in the
+# shared pool VM; supabase: a throwaway per-job VM).
 #
 # Context: installed root-owned as /usr/local/libexec/ghr/launch and invoked by slot-loop.sh via
 #   printf %s "$JIT" | sudo -n -u ghr /usr/local/libexec/ghr/launch light 3
@@ -10,6 +11,11 @@
 # CRITICAL: the JIT config arrives on STDIN only. It is never placed in argv or the environment
 # on the host (visible to every local user via ps). It is forwarded the same way into the
 # container, whose entrypoint does `read -r J; exec ./run.sh --jitconfig "$J"`.
+#
+# supabase class: a fresh Lima VM `ghr-supa-<n>` is cloned from the STOPPED golden for every job,
+# the runner runs natively inside it (own Docker daemon and loopback, which `supabase start` needs)
+# and the VM is stopped + deleted on EVERY exit path (success, failure, preflight refusal, timeout,
+# signal). The golden is never started, stopped, or modified here.
 #
 # Exit codes: 0/N = runner's own exit code, 2 = bad args/stdin/config, 3 = preflight refused
 # (guest can reach the LAN), 124 = job timeout hit.
@@ -25,8 +31,11 @@ export PATH
 # only the repo/test copy (0) honours the override variables below.
 GHR_INSTALLED=0
 if [ "$GHR_INSTALLED" = 1 ]; then
+  # Caller overrides AND config-owned settings: the root-owned config file is the only source.
   unset LIMA_HOME BASH_ENV ENV CDPATH GHR_CONFIG LIMACTL POOL_INSTANCE POOL_GOLDEN \
-    JOB_TIMEOUT_SECS GHR_POOL_LOCK POOL_LOCK_WAIT TMPDIR GH_API_BASE
+    JOB_TIMEOUT_SECS SUPA_GOLDEN SUPA_DESTROY_TIMEOUT GHR_POOL_LOCK POOL_LOCK_WAIT TMPDIR GH_API_BASE \
+    ORG RUNNER_GROUP_ID LIGHT_SLOTS LIGHT_LABELS LIGHT_IMAGE ALLOWED_LABELS LAN_PROBE \
+    SUPABASE_SLOTS SUPABASE_LABELS SUPA_MEM SUPA_CPUS
 fi
 
 set -uo pipefail
@@ -38,6 +47,10 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LIMACTL="${LIMACTL:-/usr/local/bin/limactl}"
 POOL_INSTANCE="${POOL_INSTANCE:-ghr-pool}"
 LIGHT_MAX=6
+SUPA_MAX=3
+SUPA_GOLDEN="${SUPA_GOLDEN:-ghr-supa-golden}"
+# Upper bound for each stop/delete/list of a per-job VM; a hung limactl must not hang the slot.
+SUPA_DESTROY_TIMEOUT="${SUPA_DESTROY_TIMEOUT:-120}"
 # 6 h = GitHub's maximum job time; anything longer is a wedge.
 JOB_TIMEOUT_SECS="${JOB_TIMEOUT_SECS:-21600}"
 
@@ -45,11 +58,22 @@ JOB_TIMEOUT_SECS="${JOB_TIMEOUT_SECS:-21600}"
 sibling() { if [ -x "$HERE/$1" ]; then echo "$HERE/$1"; else echo "$HERE/$1.sh"; fi; }
 
 launch_validate_args() {
-  local class=$1 n=$2
-  [ "$class" = "light" ] || { echo "launch: unsupported class: $class" >&2; return 1; }
+  local class=$1 n=$2 max cfg
+  case "$class" in
+    light) max=$LIGHT_MAX; cfg=${LIGHT_SLOTS:-$LIGHT_MAX} ;;
+    supabase) max=$SUPA_MAX; cfg=${SUPABASE_SLOTS:-0} ;;
+    *) echo "launch: unsupported class: $class" >&2; return 1 ;;
+  esac
   [[ "$n" =~ ^[1-9][0-9]*$ ]] || { echo "launch: invalid slot number" >&2; return 1; }
-  [ "$n" -le "$LIGHT_MAX" ] || { echo "launch: slot out of range 1..$LIGHT_MAX" >&2; return 1; }
-  [ "$n" -le "${LIGHT_SLOTS:-$LIGHT_MAX}" ] || { echo "launch: slot beyond configured LIGHT_SLOTS" >&2; return 1; }
+  [ "$n" -le "$max" ] || { echo "launch: slot out of range 1..$max" >&2; return 1; }
+  [ "$n" -le "$cfg" ] || { echo "launch: slot beyond configured ${class} slots ($cfg)" >&2; return 1; }
+}
+
+# launch_validate_supa — VM sizing comes from root-owned config but is still validated: it ends up
+# in a yq expression handed to limactl.
+launch_validate_supa() {
+  [[ "${SUPA_MEM:-}" =~ ^[1-9][0-9]*GiB$ ]] || { echo "launch: SUPA_MEM must look like 4GiB" >&2; return 1; }
+  [[ "${SUPA_CPUS:-}" =~ ^[1-9][0-9]?$ ]] || { echo "launch: SUPA_CPUS must be 1..99" >&2; return 1; }
 }
 
 # The image must be immutable: either repo@sha256:<digest> or a bare LOCAL image ID
@@ -62,19 +86,20 @@ launch_validate_image() {
   [[ "$img" =~ ^[a-z0-9][a-z0-9./_-]*(:[A-Za-z0-9._-]+)?@sha256:[0-9a-f]{64}$ ]]
 }
 
-# launch_preflight — exit 0 iff the pool guest CANNOT reach the LAN probe target.
+# launch_preflight [INSTANCE] — exit 0 iff the guest (default: the pool VM) CANNOT reach the LAN
+# probe target.
 # WHY from inside the guest: the pf rule blocks the VM's egress; checking from the host would
 # prove nothing. Fails closed: an unset LAN_PROBE or an unusable guest shell is a refusal.
 launch_preflight() {
   [[ "${LAN_PROBE:-}" =~ ^[A-Za-z0-9.-]+:[0-9]+$ ]] || { ghr_log "preflight: LAN_PROBE unset/invalid, refusing"; return 3; }
-  local host=${LAN_PROBE%:*} port=${LAN_PROBE##*:}
-  "$LIMACTL" shell "$POOL_INSTANCE" -- true < /dev/null > /dev/null 2>&1 \
+  local host=${LAN_PROBE%:*} port=${LAN_PROBE##*:} inst=${1:-$POOL_INSTANCE}
+  "$LIMACTL" shell "$inst" -- true < /dev/null > /dev/null 2>&1 \
     || { ghr_log "preflight: guest shell unusable, refusing"; return 3; }
   # Only rc 1 (connect refused/unreachable) and 124 (timeout: packets dropped) mean "blocked".
   # 0 = reachable; anything else (2 syntax, 126/127 missing tool, 255 ssh failure) is a probe we
   # cannot interpret, and an uninterpretable probe must not pass. /usr/bin/timeout runs in the
   # Linux guest, not on the host.
-  "$LIMACTL" shell "$POOL_INSTANCE" -- /usr/bin/timeout 5 bash -c "exec 3<>/dev/tcp/${host}/${port}" < /dev/null > /dev/null 2>&1
+  "$LIMACTL" shell "$inst" -- /usr/bin/timeout 5 bash -c "exec 3<>/dev/tcp/${host}/${port}" < /dev/null > /dev/null 2>&1
   case $? in
     1 | 124) return 0 ;;
     0) ghr_log "preflight: guest CAN reach $LAN_PROBE -- egress isolation broken, refusing"; return 3 ;;
@@ -86,15 +111,15 @@ launch_cleanup() {
   "$LIMACTL" shell "$POOL_INSTANCE" -- sudo docker rm -f "$1" < /dev/null > /dev/null 2>&1 || true
 }
 
-# launch_run NAME JIT — run the container with JIT on stdin, enforcing the job timeout.
-launch_run() {
-  local cname=$1 jit=$2 child watcher rc
-  launch_cleanup "$cname"
+# run_watched JIT CMD... — run CMD with the JIT on its stdin under the job-timeout watchdog.
+# Returns CMD's exit code, 124 on timeout, 143 if we were signalled.
+run_watched() {
+  local jit=$1 child watcher rc
+  shift
   # Subshell + builtin printf: the JIT travels only through the pipe.
-  ( printf '%s\n' "$jit" | "$LIMACTL" shell "$POOL_INSTANCE" -- sudo docker run --rm -i \
-      --name "$cname" --memory 2g --cpus 2 "$LIGHT_IMAGE" \
-      bash -c 'read -r J; exec ./run.sh --jitconfig "$J"' ) &
+  ( printf '%s\n' "$jit" | "$@" ) &
   child=$!
+  LAUNCH_CHILD=$child
   # WHY sleep+wait+trap: killing a plain `sleep 21600` subshell would orphan the sleep for hours.
   ( sleep "$JOB_TIMEOUT_SECS" & sp=$!
     trap 'kill "$sp" 2> /dev/null; exit 0' TERM
@@ -102,12 +127,120 @@ launch_run() {
     echo timeout > "$TIMEOUT_FLAG"
     kill -TERM "$child" 2> /dev/null ) &
   watcher=$!
-  wait "$child"
-  rc=$?
+  rc=0
+  wait "$child" || rc=$?
+  # A trapped signal interrupts `wait`; make sure the child is really gone before cleanup.
+  if kill -0 "$child" 2> /dev/null; then kill -TERM "$child" 2> /dev/null; wait "$child" 2> /dev/null || true; fi
   kill "$watcher" 2> /dev/null
   wait "$watcher" 2> /dev/null
-  launch_cleanup "$cname"
   if [ -s "$TIMEOUT_FLAG" ]; then ghr_log "launch: job timeout after ${JOB_TIMEOUT_SECS}s"; return 124; fi
+  [ "$SIGNALLED" -eq 0 ] || return 143
+  return "$rc"
+}
+
+# launch_run NAME JIT — light: container in the shared pool VM.
+launch_run() {
+  local cname=$1 jit=$2 rc
+  launch_cleanup "$cname"
+  rc=0
+  run_watched "$jit" "$LIMACTL" shell "$POOL_INSTANCE" -- sudo docker run --rm -i \
+    --name "$cname" --memory 2g --cpus 2 "$LIGHT_IMAGE" \
+    bash -c 'read -r J; exec ./run.sh --jitconfig "$J"' || rc=$?
+  launch_cleanup "$cname"
+  return "$rc"
+}
+
+# ── supabase class: one throwaway VM per job ──────────────────────────────────
+
+# run_bounded SECS CMD... — run CMD, kill it if it outlives SECS (no host `timeout` on macOS).
+# Returns CMD's status, or 143/137 when the bound fired.
+run_bounded() {
+  local secs=$1 pid wd rc=0
+  shift
+  "$@" &
+  pid=$!
+  ( sleep "$secs" & sp=$!
+    trap 'kill "$sp" 2> /dev/null; exit 0' TERM
+    wait "$sp"
+    kill -TERM "$pid" 2> /dev/null
+    sleep 1
+    kill -KILL "$pid" 2> /dev/null ) &
+  wd=$!
+  wait "$pid" || rc=$?
+  kill "$wd" 2> /dev/null
+  wait "$wd" 2> /dev/null || true
+  return "$rc"
+}
+
+# supa_destroy VM — stop + delete (bounded), then VERIFY the VM is gone via `limactl list`.
+# Returns 1 and logs a loud LEAK error if it is not. Never touches the golden: callers only ever
+# pass per-slot names, and the golden name is refused here too.
+supa_destroy() {
+  local vm=$1 attempt status=""
+  [ "$vm" != "$SUPA_GOLDEN" ] || { ghr_log "ERROR refusing to destroy the golden"; return 1; }
+  for attempt in 1 2; do
+    run_bounded "$SUPA_DESTROY_TIMEOUT" "$LIMACTL" stop -f "$vm" < /dev/null > /dev/null 2>&1 \
+      || ghr_log "WARN limactl stop -f $vm failed or timed out (attempt $attempt)"
+    run_bounded "$SUPA_DESTROY_TIMEOUT" "$LIMACTL" delete -f "$vm" < /dev/null > /dev/null 2>&1 \
+      || ghr_log "WARN limactl delete -f $vm failed or timed out (attempt $attempt)"
+    status=$("$LIMACTL" list "$vm" --format '{{.Status}}' < /dev/null 2> /dev/null || true)
+    [ -z "$status" ] && return 0
+  done
+  ghr_log "ERROR LEAK: VM $vm still present ($status) after cleanup"
+  return 1
+}
+
+# supa_sweep — delete ghr-supa-* VMs that do not correspond to a configured slot (crashed runs,
+# a lowered SUPABASE_SLOTS, hand-made strays). Configured slots may be mid-job on another slot loop,
+# so they are never touched; the golden never is either.
+supa_sweep() {
+  local names name n keep
+  names=$(run_bounded "$SUPA_DESTROY_TIMEOUT" "$LIMACTL" list --format '{{.Name}}' < /dev/null 2> /dev/null || true)
+  for name in $names; do
+    case "$name" in ghr-supa-*) ;; *) continue ;; esac
+    [ "$name" != "$SUPA_GOLDEN" ] || continue
+    keep=0
+    if [[ "$name" =~ ^ghr-supa-([1-9][0-9]*)$ ]]; then
+      n=${BASH_REMATCH[1]}
+      [ "$n" -le "${SUPABASE_SLOTS:-0}" ] && [ "$n" -le "$SUPA_MAX" ] && keep=1
+    fi
+    [ "$keep" -eq 1 ] || { ghr_log "supabase: sweeping orphan VM $name"; supa_destroy "$name" || true; }
+  done
+}
+
+# supa_run N JIT — clone the golden, boot, preflight, run the runner natively, always delete.
+supa_run() {
+  local n=$1 jit=$2 vm="ghr-supa-$1" rc=0 status
+  [ "$vm" != "$SUPA_GOLDEN" ] || return 2
+  # The golden must exist and be STOPPED (APFS CoW clone needs a quiescent source); we do not
+  # "fix" it by stopping or starting it -- that is the build script's job.
+  status=$("$LIMACTL" list "$SUPA_GOLDEN" --format '{{.Status}}' < /dev/null 2> /dev/null || true)
+  [ "$status" = "Stopped" ] || { ghr_log "supabase: golden $SUPA_GOLDEN is '${status:-missing}', need Stopped"; return 1; }
+  supa_sweep
+  # Leftover from a crashed run (same slot, same name) must go before we clone over it.
+  status=$("$LIMACTL" list "$vm" --format '{{.Status}}' < /dev/null 2> /dev/null || true)
+  if [ -n "$status" ]; then
+    ghr_log "supabase: removing leftover $vm ($status)"
+    supa_destroy "$vm" || return 1
+  fi
+  # From here on the VM must not outlive this call, whatever happens.
+  SUPA_VM=$vm
+  "$LIMACTL" clone "$SUPA_GOLDEN" "$vm" --tty=false --set ".cpus = ${SUPA_CPUS} | .memory = \"${SUPA_MEM}\"" < /dev/null > /dev/null \
+    || { ghr_log "supabase: clone failed"; supa_destroy "$vm"; return 1; }
+  "$LIMACTL" start "$vm" --tty=false < /dev/null > /dev/null \
+    || { ghr_log "supabase: start failed"; supa_destroy "$vm"; return 1; }
+  # A signal that arrived during the (slow) clone/start must not be followed by a job.
+  [ "$SIGNALLED" -eq 0 ] || { supa_destroy "$vm"; return 143; }
+  launch_preflight "$vm" || { rc=$?; supa_destroy "$vm"; return "$rc"; }
+  [ "$SIGNALLED" -eq 0 ] || { supa_destroy "$vm"; return 143; }
+  # The runner runs natively as `runner` (uid 1001); read -r pulls the JIT from stdin inside the
+  # guest, same convention as the container path.
+  run_watched "$jit" "$LIMACTL" shell "$vm" -- sudo -u runner -H env \
+    AGENT_TOOLSDIRECTORY=/opt/hostedtoolcache RUNNER_TOOL_CACHE=/opt/hostedtoolcache \
+    bash -c 'cd /opt/actions-runner && read -r J && exec ./run.sh --jitconfig "$J"' || rc=$?
+  # A leaked VM is a failure even when the job passed: surface it so the slot backs off and the
+  # next job's sweep retries.
+  if supa_destroy "$vm"; then SUPA_VM=""; elif [ "$rc" -eq 0 ]; then rc=1; fi
   return "$rc"
 }
 
@@ -131,14 +264,28 @@ main() {
     export HOME
   fi
   launch_validate_args "$1" "$2" || exit 2
-  local cname="ghr-$1-$2" jit=""
+  local class=$1 n=$2 cname="ghr-$1-$2" jit=""
   IFS= read -r jit || true
   [[ "$jit" =~ ^[A-Za-z0-9+/=_-]+$ ]] || { echo "launch: stdin is not a JIT config" >&2; exit 2; }
-  launch_validate_image "${LIGHT_IMAGE:-}" || { echo "launch: LIGHT_IMAGE must be pinned by @sha256 digest" >&2; exit 2; }
+  if [ "$class" = "light" ]; then
+    launch_validate_image "${LIGHT_IMAGE:-}" || { echo "launch: LIGHT_IMAGE must be pinned by @sha256 digest or be a local sha256: image ID" >&2; exit 2; }
+  else
+    launch_validate_supa || exit 2
+  fi
+  TIMEOUT_FLAG=$(mktemp "${TMPDIR:-/tmp}/ghr-launch.XXXXXX") || exit 1
+  SIGNALLED=0
+  SUPA_VM=""
+  # CRITICAL: a signal must still reach the cleanup below; the trap only records it and kills the
+  # job, the straight-line code after run_watched() then deletes the VM. The EXIT trap is the
+  # backstop for any path that bails out earlier.
+  trap 'SIGNALLED=1; [ -z "${LAUNCH_CHILD:-}" ] || kill -TERM "$LAUNCH_CHILD" 2> /dev/null' TERM INT HUP
+  trap '[ -z "${SUPA_VM:-}" ] || supa_destroy "$SUPA_VM"; rm -f "$TIMEOUT_FLAG"' EXIT
+  if [ "$class" = "supabase" ]; then
+    supa_run "$n" "$jit"
+    exit $?
+  fi
   "$(sibling pool)" ensure || exit 1
   launch_preflight || exit 3
-  TIMEOUT_FLAG=$(mktemp "${TMPDIR:-/tmp}/ghr-launch.XXXXXX") || exit 1
-  trap 'rm -f "$TIMEOUT_FLAG"' EXIT
   launch_run "$cname" "$jit"
   exit $?
 }

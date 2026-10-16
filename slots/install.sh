@@ -39,6 +39,7 @@ STATE_USER=_ghrstate
 CTL_UID="${GHRCTL_UID:-451}"
 STATE_UID="${GHRSTATE_UID:-452}"
 MAX_SLOTS=6
+MAX_SUPA_SLOTS=3
 
 DRY=0
 UNINSTALL=0
@@ -127,14 +128,19 @@ user_home() {
   dscl . -read "/Users/$1" NFSHomeDirectory 2> /dev/null | awk '{print $2}'
 }
 
-slot_count() {
+# config_int KEY DEFAULT MAX — integer setting from the installed config, else the template, capped.
+config_int() {
   local n=""
-  if [ -r "$CONFIG_DEST" ]; then n=$(sed -n 's/^LIGHT_SLOTS=\([0-9]*\).*/\1/p' "$CONFIG_DEST" | head -1); fi
-  if [ -z "$n" ]; then n=$(sed -n 's/^LIGHT_SLOTS=\([0-9]*\).*/\1/p' "${CONFIG_SRC:-$SRC/config.example.env}" | head -1); fi
-  [[ "$n" =~ ^[0-9]+$ ]] || n=6
-  [ "$n" -le "$MAX_SLOTS" ] || n=$MAX_SLOTS
+  if [ -r "$CONFIG_DEST" ]; then n=$(sed -n "s/^$1=\([0-9]*\).*/\1/p" "$CONFIG_DEST" | head -1); fi
+  if [ -z "$n" ]; then n=$(sed -n "s/^$1=\([0-9]*\).*/\1/p" "${CONFIG_SRC:-$SRC/config.example.env}" | head -1); fi
+  [[ "$n" =~ ^[0-9]+$ ]] || n=$2
+  [ "$n" -le "$3" ] || n=$3
   echo "$n"
 }
+
+slot_count() { config_int LIGHT_SLOTS 6 "$MAX_SLOTS"; }
+# supabase is opt-in: 0 (class disabled) unless configured; hard max 3 (RAM, see P0 sizing).
+supa_count() { config_int SUPABASE_SLOTS 0 "$MAX_SUPA_SLOTS"; }
 
 # Source file -> installed name (".sh" stripped; launch.sh must become exactly `launch`).
 SCRIPTS="slot-loop mint-jit reconcile launch heartbeat pool"
@@ -166,6 +172,10 @@ install_files() {
   for n in $(seq 1 "$(slot_count)"); do
     mkfile "$CTL_USER" "$LOGDIR/slot-light-$n.log"
   done
+  # NOTE: guard on the count; BSD seq counts DOWN for `seq 1 0` and would yield "1 0".
+  if [ "$(supa_count)" -gt 0 ]; then
+    for n in $(seq 1 "$(supa_count)"); do mkfile "$CTL_USER" "$LOGDIR/slot-supabase-$n.log"; done
+  fi
   mkfile "$STATE_USER" "$LOGDIR/heartbeat.log"
   mkfile ghr "$LOGDIR/pool.log"
   install_newsyslog
@@ -183,6 +193,9 @@ install_newsyslog() {
   {
     echo "# logfilename [owner:group] mode count size(KB) when flags"
     for n in $(seq 1 "$(slot_count)"); do echo "$LOGDIR/slot-light-$n.log $CTL_USER:wheel 640 5 5120 * JN"; done
+    if [ "$(supa_count)" -gt 0 ]; then
+      for n in $(seq 1 "$(supa_count)"); do echo "$LOGDIR/slot-supabase-$n.log $CTL_USER:wheel 640 5 5120 * JN"; done
+    fi
     echo "$LOGDIR/heartbeat.log $STATE_USER:wheel 640 5 5120 * JN"
     echo "$LOGDIR/pool.log ghr:wheel 640 5 5120 * JN"
   } > "$tmp"
@@ -245,6 +258,31 @@ bootstrap_daemon() {
   run launchctl bootstrap system "$plist"
 }
 
+# install_slot_plists CLASS COUNT MAX TMP CTL_HOME — render + bootstrap dev.ghr.slot.<class>-1..COUNT
+# and remove any slot above COUNT (the class was shrunk or disabled, COUNT=0).
+install_slot_plists() {
+  local class=$1 count=$2 max=$3 tmp=$4 ctl_home=$5 n plist
+  n=1
+  while [ "$n" -le "$count" ]; do
+    plist="$DAEMON_DIR/dev.ghr.slot.$class-$n.plist"
+    render_plist "$SRC/launchd/dev.ghr.slot.plist" "$tmp/slot.plist" CLASS="$class" N="$n" LIBEXEC="$LIBEXEC" CTL_HOME="$ctl_home" LOGDIR="$LOGDIR"
+    run plutil -lint "$tmp/slot.plist"
+    run install -m 0644 -o root -g wheel "$tmp/slot.plist" "$plist"
+    bootstrap_daemon "dev.ghr.slot.$class-$n" "$plist"
+    n=$((n + 1))
+  done
+  # CRITICAL: no `seq "$((count + 1))" "$max"`. BSD seq (macOS) counts DOWN when first > last, so at
+  # count == max it yields "7 6" and removed the slot just installed (2026-10-16, light-6).
+  n=$((count + 1))
+  while [ "$n" -le "$max" ]; do
+    if [ -e "$DAEMON_DIR/dev.ghr.slot.$class-$n.plist" ]; then
+      run launchctl bootout "system/dev.ghr.slot.$class-$n" 2> /dev/null || true
+      run rm -f "$DAEMON_DIR/dev.ghr.slot.$class-$n.plist"
+    fi
+    n=$((n + 1))
+  done
+}
+
 install_daemons() {
   local n count plist tmp ctl_home state_home ghr_home
   count=$(slot_count)
@@ -255,13 +293,8 @@ install_daemons() {
   state_home="/var/db/$STATE_USER"
   ghr_home=$(user_home ghr)
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/ghr-plists.XXXXXX")
-  for n in $(seq 1 "$count"); do
-    plist="$DAEMON_DIR/dev.ghr.slot.light-$n.plist"
-    render_plist "$SRC/launchd/dev.ghr.slot.plist" "$tmp/slot.plist" CLASS=light N="$n" LIBEXEC="$LIBEXEC" CTL_HOME="$ctl_home" LOGDIR="$LOGDIR"
-    run plutil -lint "$tmp/slot.plist"
-    run install -m 0644 -o root -g wheel "$tmp/slot.plist" "$plist"
-    bootstrap_daemon "dev.ghr.slot.light-$n" "$plist"
-  done
+  install_slot_plists light "$count" "$MAX_SLOTS" "$tmp" "$ctl_home"
+  install_slot_plists supabase "$(supa_count)" "$MAX_SUPA_SLOTS" "$tmp" "$ctl_home"
   render_plist "$SRC/launchd/dev.ghr.heartbeat.plist" "$tmp/hb.plist" LIBEXEC="$LIBEXEC" STATE_HOME="$state_home" LOGDIR="$LOGDIR"
   run plutil -lint "$tmp/hb.plist"
   run install -m 0644 -o root -g wheel "$tmp/hb.plist" "$DAEMON_DIR/dev.ghr.heartbeat.plist"
@@ -271,17 +304,6 @@ install_daemons() {
   run install -m 0644 -o root -g wheel "$tmp/pool.plist" "$DAEMON_DIR/dev.ghr.pool.plist"
   bootstrap_daemon dev.ghr.pool "$DAEMON_DIR/dev.ghr.pool.plist"
   rm -rf "$tmp"
-  # Slots beyond the configured count (LIGHT_SLOTS lowered) must not keep running.
-  # CRITICAL: no `seq "$((count + 1))" "$MAX_SLOTS"` here. BSD seq (macOS) counts DOWN when first > last,
-  # so at count == MAX_SLOTS it yields "7 6" and removed the slot just installed (2026-10-16, light-6).
-  n=$((count + 1))
-  while [ "$n" -le "$MAX_SLOTS" ]; do
-    if [ -e "$DAEMON_DIR/dev.ghr.slot.light-$n.plist" ]; then
-      run launchctl bootout "system/dev.ghr.slot.light-$n" 2> /dev/null || true
-      run rm -f "$DAEMON_DIR/dev.ghr.slot.light-$n.plist"
-    fi
-    n=$((n + 1))
-  done
 }
 
 do_uninstall() {
@@ -289,6 +311,10 @@ do_uninstall() {
   for n in $(seq 1 "$MAX_SLOTS"); do
     run launchctl bootout "system/dev.ghr.slot.light-$n" 2> /dev/null || true
     run rm -f "$DAEMON_DIR/dev.ghr.slot.light-$n.plist"
+  done
+  for n in $(seq 1 "$MAX_SUPA_SLOTS"); do
+    run launchctl bootout "system/dev.ghr.slot.supabase-$n" 2> /dev/null || true
+    run rm -f "$DAEMON_DIR/dev.ghr.slot.supabase-$n.plist"
   done
   for n in heartbeat pool; do
     run launchctl bootout "system/dev.ghr.$n" 2> /dev/null || true

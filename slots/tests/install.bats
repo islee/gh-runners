@@ -154,3 +154,50 @@ SH
   [[ "$output" == *"launchctl bootstrap system $W/daemons/dev.ghr.slot.light-6.plist"* ]]
   refute grep -q -F "rm -f $W/daemons/dev.ghr.slot.light-6.plist" <<< "$output"
 }
+
+@test "supabase plists/logs are rendered ONLY when SUPABASE_SLOTS > 0 (default config: none)" {
+  run bash "$SLOTS_DIR/install.sh" --dry-run
+  [ "$status" -eq 0 ]
+  refute grep -q 'dev.ghr.slot.supabase' <<< "$output"
+  refute grep -q 'slot-supabase' <<< "$output"
+  printf 'SUPABASE_SLOTS=2\n' > "$W/cfg.env"
+  run bash "$SLOTS_DIR/install.sh" --dry-run --config "$W/cfg.env"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"launchctl bootstrap system $W/daemons/dev.ghr.slot.supabase-1.plist"* ]]
+  [[ "$output" == *"launchctl bootstrap system $W/daemons/dev.ghr.slot.supabase-2.plist"* ]]
+  refute grep -q 'supabase-3' <<< "$output"
+  [[ "$output" == *"chmod 0640 $W/log/slot-supabase-1.log"* ]]
+}
+
+@test "supabase slots are capped at 3 and a shrunk/disabled class has its stale plists removed" {
+  printf 'SUPABASE_SLOTS=9\n' > "$W/cfg.env"
+  run bash "$SLOTS_DIR/install.sh" --dry-run --config "$W/cfg.env"
+  [[ "$output" == *"dev.ghr.slot.supabase-3.plist"* ]]
+  refute grep -q 'supabase-4' <<< "$output"
+  # class disabled but a plist from an earlier install exists -> bootout + rm (count 0 must not make BSD seq count down)
+  mkdir -p "$W/daemons"; : > "$W/daemons/dev.ghr.slot.supabase-2.plist"
+  printf 'SUPABASE_SLOTS=0\n' > "$W/cfg.env"
+  run bash "$SLOTS_DIR/install.sh" --dry-run --config "$W/cfg.env"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"launchctl bootout system/dev.ghr.slot.supabase-2"* ]]
+  [[ "$output" == *"rm -f $W/daemons/dev.ghr.slot.supabase-2.plist"* ]]
+  refute grep -q 'bootstrap system .*supabase' <<< "$output"
+}
+
+@test "uninstall covers the supabase slot daemons" {
+  run bash "$SLOTS_DIR/install.sh" --dry-run --uninstall
+  for n in 1 2 3; do [[ "$output" == *"launchctl bootout system/dev.ghr.slot.supabase-$n"* ]]; done
+}
+
+@test "supabase plist renders with the class and slot in label, args and log path" {
+  source "$SLOTS_DIR/install.sh"
+  render_plist "$SLOTS_DIR/launchd/dev.ghr.slot.plist" "$W/s.plist" CLASS=supabase N=2 LIBEXEC=/x/libexec CTL_HOME=/var/db/_ghrctl LOGDIR=/x/log
+  python3 - "$W/s.plist" <<'PY'
+import plistlib, sys
+p = plistlib.load(open(sys.argv[1], "rb"))
+assert p["Label"] == "dev.ghr.slot.supabase-2"
+assert p["ProgramArguments"] == ["/x/libexec/slot-loop", "supabase", "2"]
+assert p["StandardOutPath"] == "/x/log/slot-supabase-2.log"
+assert p["UserName"] == "_ghrctl" and p["AbandonProcessGroup"] is True
+PY
+}

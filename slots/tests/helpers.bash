@@ -97,3 +97,52 @@ b64url_decode() {
 # refute CMD... — assert CMD fails. WHY not bare `! cmd`: bats runs under set -e, which ignores a
 # negated command that is not the last line of a test, so `! grep ...` would pass vacuously.
 refute() { if "$@"; then return 1; fi; }
+
+# lima_setup — limactl shim shared by the launch suites. Records every call in $LIMA_LOG; every
+# call that is not a runner start has its stdin captured in $LIMA_OTHER_STDIN so tests can prove no
+# limactl call swallowed the caller's stdin. Knobs (env): FAKE_POOL_STATUS (light pool VM),
+# FAKE_GOLDEN_STATUS (default Stopped), FAKE_VM_STATUS (per-job VM, default absent), FAKE_PROBE_RC,
+# FAKE_RUN_RC, FAKE_RUN_SLEEP, FAKE_CLONE_RC, FAKE_CLONE_SLEEP, FAKE_START_RC, FAKE_STOP_RC/_SLEEP,
+# FAKE_DELETE_RC, FAKE_DELETE_PERSIST (delete "succeeds" but the VM stays listed), FAKE_ALL_VMS (names
+# returned by `list --format {{.Name}}`). Every call also appends its environment to $LIMA_ENV.
+lima_setup() {
+  LIMA_LOG="$W/lima.log"
+  LIMA_STDIN="$W/lima.stdin"
+  LIMA_OTHER_STDIN="$W/lima.other.stdin"
+  LIMA_ENV="$W/lima.env"
+  VMSTATE="$W/vmstate"
+  mkdir -p "$VMSTATE"
+  : > "$LIMA_LOG"
+  : > "$LIMA_OTHER_STDIN"
+  : > "$LIMA_ENV"
+  export LIMA_LOG LIMA_STDIN LIMA_OTHER_STDIN LIMA_ENV VMSTATE GHR_POOL_LOCK="$W/pool.lock"
+  cat > "$FAKE_BIN/limactl" <<'SHIM'
+#!/bin/bash
+echo "$*" >> "$LIMA_LOG"
+env >> "$LIMA_ENV"
+case "$*" in *"docker run"* | *"sudo -u runner"*) ;; *) cat >> "$LIMA_OTHER_STDIN" ;; esac
+# per-job VM name: the last ghr-supa-* argument that is not the golden (clone: its 2nd name)
+vm=""
+for a in "$@"; do case "$a" in ghr-supa-golden) ;; ghr-supa-*) vm=$a ;; esac; done
+case "$*" in
+  "list --format"*) printf '%s' "${FAKE_ALL_VMS-}" ;;
+  "list ghr-supa-golden"*) printf '%s' "${FAKE_GOLDEN_STATUS-Stopped}" ;;
+  "list ghr-supa-"*)
+    if [ -f "$VMSTATE/$vm.gone" ]; then :
+    elif [ -f "$VMSTATE/$vm" ]; then cat "$VMSTATE/$vm"
+    else printf '%s' "${FAKE_VM_STATUS-}"; fi ;;
+  "list "*) printf '%s' "${FAKE_POOL_STATUS-Running}" ;;
+  "clone "*) sleep "${FAKE_CLONE_SLEEP:-0}"; echo Stopped > "$VMSTATE/$vm"; rm -f "$VMSTATE/$vm.gone"; exit "${FAKE_CLONE_RC:-0}" ;;
+  "start ghr-supa-"*) echo Running > "$VMSTATE/$vm"; exit "${FAKE_START_RC:-0}" ;;
+  "stop -f ghr-supa-"*) sleep "${FAKE_STOP_SLEEP:-0}"; [ "${FAKE_STOP_RC:-0}" -eq 0 ] && echo Stopped > "$VMSTATE/$vm"; exit "${FAKE_STOP_RC:-0}" ;;
+  "delete -f ghr-supa-"*)
+    if [ "${FAKE_DELETE_RC:-0}" -eq 0 ] && [ -z "${FAKE_DELETE_PERSIST:-}" ]; then rm -f "$VMSTATE/$vm"; : > "$VMSTATE/$vm.gone"; fi
+    exit "${FAKE_DELETE_RC:-0}" ;;
+  *dev/tcp*) exit "${FAKE_PROBE_RC:-1}" ;;
+  *"docker run"* | *"sudo -u runner"*) cat > "$LIMA_STDIN"; sleep "${FAKE_RUN_SLEEP:-0}"; exit "${FAKE_RUN_RC:-0}" ;;
+  *) exit 0 ;;
+esac
+SHIM
+  chmod +x "$FAKE_BIN/limactl"
+  export LIMACTL="$FAKE_BIN/limactl"
+}
