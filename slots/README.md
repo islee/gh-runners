@@ -29,6 +29,7 @@ LaunchDaemon dev.ghr.slot.light-N  (_ghrctl)        LaunchDaemon dev.ghr.heartbe
 | `launchd/*.plist` | root | Templates for slot / heartbeat / pool daemons (`@PLACEHOLDER@` rendered by install.sh) |
 | `config.example.env` | root | Template for `/usr/local/etc/ghr/slots.env` (no secrets) |
 | `../images/light/`, `../images/build-light.sh` | ghr | Derived runner image (hosted-parity tools + pre-warmed tool cache) and its Lima build script |
+| `../images/supabase/`, `../images/build-supabase.sh` | ghr | Golden VM for the supabase class (provision, tool cache, full Supabase image pre-pull) |
 | `tests/*.bats`, `tests/helpers.bash`, `tests/run-bats.sh` | CI | Offline suite; curl/limactl/sudo are shims |
 
 ## Patterns
@@ -92,3 +93,8 @@ Operator clears a tripwire by deleting `/var/db/ghr/tripwire` after removing the
    takes full effect only after a daemon restart.
 13. Role-account UIDs default to 451/452 (`GHRCTL_UID`/`GHRSTATE_UID` override) and the `sysadminctl
    -roleAccount` flags were not exercised on a real host by the test suite.
+14. supabase class: `SUPABASE_SLOTS=0` (default) disables it; at most 3. Each job clones the STOPPED
+   golden `ghr-supa-golden`, runs the runner natively in the VM and deletes the VM on every exit
+   path (success, failure, timeout, signal, preflight refusal). `launch` never starts, stops or
+   edits the golden; a missing or running golden is a refusal. Build it with
+   `images/build-supabase.sh`; the LAN preflight runs inside each VM.
