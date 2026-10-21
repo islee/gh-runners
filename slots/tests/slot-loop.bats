@@ -200,3 +200,54 @@ do_launch() { exec sleep 20; }' 1
   [ "$(cat "$SUDO_ARGV")" = "$(printf -- '-n\n-u\nghr\n%s\nsupabase\n1' "$LAUNCH_BIN")" ]
   [ -f "$W/state/supabase-1.json" ]
 }
+
+@test "launch user is configurable: LAUNCH_USER=root runs the launch script as root (Proxmox host)" {
+  source "$SLOTS_DIR/slot-loop.sh"
+  LAUNCH_USER=root
+  LAUNCH_BIN=/usr/local/libexec/ghr/launch-pve
+  CLASS=supabase
+  N=3
+  JIT="$JIT_BLOB"
+  FAKE_LAUNCH_RC=0 do_launch
+  [ "$(cat "$SUDO_ARGV")" = "$(printf -- '-n\n-u\nroot\n/usr/local/libexec/ghr/launch-pve\nsupabase\n3')" ]
+  [ "$(cat "$SUDO_STDIN")" = "$JIT_BLOB" ]
+  refute grep -q "$JIT_BLOB" "$SUDO_ARGV"
+}
+
+@test "launch user defaults to ghr (macOS behaviour unchanged)" {
+  grep -q '^LAUNCH_USER="${LAUNCH_USER:-ghr}"' "$SLOTS_DIR/slot-loop.sh"
+  grep -q 'sudo -n -u "$LAUNCH_USER" "$LAUNCH_BIN" "$CLASS" "$N"' "$SLOTS_DIR/slot-loop.sh"
+}
+
+@test "PVE_SLOTS: a listed supabase slot is accepted although SUPABASE_SLOTS=0; unlisted and other classes are not" {
+  source "$SLOTS_DIR/slot-loop.sh"
+  PVE_SLOTS="5, 6"
+  pve_slot_listed 5
+  pve_slot_listed 6
+  refute pve_slot_listed 4
+  refute pve_slot_listed 55
+  PVE_SLOTS=""
+  refute pve_slot_listed 5
+  printf 'PVE_SLOTS="5"\n' >> "$W/slots.env"
+  run bash "$SLOTS_DIR/slot-loop.sh" supabase 4
+  [ "$status" -eq 2 ]
+  # light is not opened up by PVE_SLOTS
+  printf 'LIGHT_SLOTS=1\n' >> "$W/slots.env"
+  run bash "$SLOTS_DIR/slot-loop.sh" light 3
+  [ "$status" -eq 2 ]
+}
+
+@test "PVE_SLOTS: supabase-5 passes the range check and enters the loop (stays alive, exits 143 on SIGTERM)" {
+  printf 'PVE_SLOTS="5"\nSUPABASE_SLOTS=0\n' >> "$W/slots.env"
+  # reconcile/mint hit the curl shim (404) -> the cycle fails and the loop backs off; what matters is
+  # that it did NOT exit 2 at the range check
+  bash "$SLOTS_DIR/slot-loop.sh" supabase 5 > "$W/loop.out" 2>&1 3>&- &
+  pid=$!
+  sleep 1
+  kill -0 "$pid"
+  kill -TERM "$pid"
+  rc=0
+  wait "$pid" || rc=$?
+  [ "$rc" -ne 2 ]
+  refute grep -q "beyond configured" "$W/loop.out"
+}

@@ -25,6 +25,11 @@
 # labels differing from the class label is logged as TRIPWIRE and latched into
 # $GHR_HB_ROOT/tripwire; while latched the published state is `down` (operator deletes the file).
 # NOTE: `ok` cannot see the job queue (state App has no Actions:read); the org-side rescuer covers it.
+# Remote slots (REMOTE_SLOTS="supabase-5"): slots served by ANOTHER host (the optional Proxmox node,
+# slots/launch-pve.sh) have no state file here. They are best-effort extra capacity: the tripwire
+# accepts their runner names, saturation counts each as one more slot of its class (busy when its
+# runner is busy OR absent/offline, since an unreachable slot gives no capacity), and they can
+# NEVER make the state `down`.
 #
 # Dependencies: lib/gh-app.sh. Uses the STATE App (never the runner App).
 
@@ -50,6 +55,30 @@ STATE_VAR_NAME="${STATE_VAR_NAME:-SELF_HOSTED_STATE}"
 # Slot files are our own fixed-format single-line JSON, so sed is enough (no python per slot).
 state_field_num() { sed -n "s/.*\"$2\":\([0-9][0-9]*\).*/\1/p" "$1" | head -1; }
 state_field_str() { sed -n "s/.*\"$2\":\"\([a-z-]*\)\".*/\1/p" "$1" | head -1; }
+
+# remote_nums CLASS LOCAL_COUNT [quiet] — print the valid remote slot numbers of CLASS, one per
+# line. REMOTE_SLOTS entries must look like <light|supabase>-<n>; invalid ones and ones colliding
+# with a local slot (n <= LOCAL_COUNT, which has a state file and stuck detection) are ignored and
+# logged (unless quiet, so the tripwire pass does not log everything twice).
+remote_nums() {
+  local class=$1 local_count=$2 quiet=${3:-} rs=${REMOTE_SLOTS:-} ent n seen=" "
+  for ent in ${rs//,/ }; do
+    if ! [[ "$ent" =~ ^(light|supabase)-[1-9][0-9]{0,5}$ ]]; then
+      [ -n "$quiet" ] || ghr_log "WARN REMOTE_SLOTS: ignoring invalid entry '$ent'"
+      continue
+    fi
+    [ "${ent%-*}" = "$class" ] || continue
+    n=${ent##*-}
+    if [ "$n" -le "$local_count" ]; then
+      [ -n "$quiet" ] || ghr_log "WARN REMOTE_SLOTS: $ent collides with a local slot, ignoring"
+      continue
+    fi
+    # a repeated entry must not count twice
+    case "$seen" in *" $n "*) continue ;; esac
+    seen="$seen$n "
+    printf '%s\n' "$n"
+  done
+}
 
 # compute_state STATE_DIR NOW RUNNERS_TSV HB_DIR — print the state WITHOUT the timestamp:
 #   down | ok | ok/sat=<classes> | saturated
@@ -108,6 +137,20 @@ compute_state() {
     done
   done
   [ "$total" -gt 0 ] || { echo down; return 0; }
+  # Remote slots (see header): extra capacity only, never `down`. Idle = online and not busy;
+  # absent/offline counts as busy so an unreachable remote host cannot hold back spilling.
+  local rn rstatus rbusy
+  for class in light supabase; do
+    case $class in light) count=${LIGHT_SLOTS:-0} ;; supabase) count=${SUPABASE_SLOTS:-0} ;; esac
+    for rn in $(remote_nums "$class" "$count"); do
+      rstatus=$(awk -F'\t' -v nm="ghr-$class-$rn" '$2 == nm && !f { print $3; f = 1 }' "$runners")
+      rbusy=$(awk -F'\t' -v nm="ghr-$class-$rn" '$2 == nm && !f { print $4; f = 1 }' "$runners")
+      case $class in
+        light) total_light=$((total_light + 1)); if [ "$rstatus" != online ] || [ "$rbusy" = "true" ]; then busy_light=$((busy_light + 1)); fi ;;
+        supabase) total_supabase=$((total_supabase + 1)); if [ "$rstatus" != online ] || [ "$rbusy" = "true" ]; then busy_supabase=$((busy_supabase + 1)); fi ;;
+      esac
+    done
+  done
   # Per-class saturation: every configured slot of the class busy, continuously, for >= SATURATED_SECS.
   local sat="" configured=0 nsat=0 tc bc
   for class in light supabase; do
@@ -161,8 +204,9 @@ retiring() {
 
 # tripwire_names [NOW] < tsv — print names of runners that do not belong to this fleet:
 #   - name not matching ghr-(light|supabase)-<n>
-#   - <n> outside 1..<configured slot count> for its class (LIGHT_SLOTS / SUPABASE_SLOTS),
-#     unless the slot is retiring (see retiring)
+#   - <n> outside 1..<configured slot count> for its class (LIGHT_SLOTS / SUPABASE_SLOTS), unless
+#     the runner is listed in REMOTE_SLOTS (a slot served by another host) or the slot is retiring
+#     (see retiring)
 #   - custom labels different from the configured label set for its class
 # WHY: a foreign or copied runner in the org can steal jobs meant for the pool.
 tripwire_names() {
@@ -179,8 +223,13 @@ tripwire_names() {
     fi
     want=$(expected_labels "$class")
     [ "$labels" = "$want" ] || { printf '%s\n' "$name"; continue; }
-    if [ "$((10#$num))" -gt "$count" ] && ! retiring "$class" "$((10#$num))" "$now"; then
-      printf '%s\n' "$name"
+    if [ "$((10#$num))" -gt "$count" ]; then
+      # beyond the local count: accepted only as a listed REMOTE_SLOTS entry (another host's slot)
+      # or as one of this host's own slots still retiring after a scale-down
+      case " $(remote_nums "$class" "$count" quiet | tr '\n' ' ')" in
+        *" $((10#$num)) "*) continue ;;
+      esac
+      retiring "$class" "$((10#$num))" "$now" || printf '%s\n' "$name"
     fi
   done
 }

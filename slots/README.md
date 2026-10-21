@@ -1,4 +1,4 @@
-# slots/ — slot-loop controller for a self-hosted runner pool (macOS host + Lima VM)
+# slots/ — slot-loop controller for a self-hosted runner pool (macOS host + Lima VM; optional Proxmox host)
 
 ## Purpose
 
@@ -31,7 +31,13 @@ LaunchDaemon dev.ghr.slot.light-N  (_ghrctl)        LaunchDaemon dev.ghr.heartbe
 | `config.example.env` | root | Template for `/usr/local/etc/ghr/slots.env` (no secrets) |
 | `../images/light/`, `../images/build-light.sh` | ghr | Derived runner image (hosted-parity tools + pre-warmed tool cache) and its Lima build script |
 | `../images/supabase/`, `../images/build-supabase.sh` | ghr | Golden VM for the supabase class (provision, tool cache, full Supabase image pre-pull) |
-| `tests/*.bats`, `tests/helpers.bash`, `tests/run-bats.sh` | CI | Offline suite; curl/limactl/sudo are shims |
+| `launch-pve.sh <class> <n>` | root via sudo (Proxmox host) | Proxmox counterpart of `launch`'s supabase path: linked clone of the golden template, per-VM firewall file, guest-agent preflight + JIT hand-off, destroy on every exit |
+| `install-pve.sh` | root (Proxmox host) | Account `ghrctl`, scripts, sudoers, `ghr-slot@.service` instances for `PVE_SLOTS`; `--dry-run`, `--uninstall [--purge]` |
+| `slot-unit.sh <class>-<n>` | `ghrctl` (systemd) | Splits the unit instance name and execs `slot-loop` |
+| `systemd/ghr-slot@.service` | root | Template unit rendered by `install-pve.sh` |
+| `lib/pve-fw.sh`, `lib/pve-guest.sh` | sourced | The egress-isolation firewall file (single source) and bounded `qm guest exec` helpers |
+| `../images/build-supabase-pve.sh`, `../images/supabase/{ghr-runner.service,ghr-runner-run,pve-user-data.yaml}` | root (Proxmox host) | Proxmox golden build and the guest-side per-job runner unit |
+| `tests/*.bats`, `tests/helpers.bash`, `tests/run-bats.sh` | CI | Offline suite; curl/limactl/qm/sudo are shims |
 
 ## Patterns
 
@@ -112,3 +118,29 @@ Operator clears a tripwire by deleting `/var/db/ghr/tripwire` after removing the
    loop is still mid-job after 30 s, handed to a one-shot `dev.ghr.reload.<slot>` job
    (`reload-slot.sh`, plist under `/usr/local/etc/ghr/reload`, waits up to 7 h) and reported as
    `[install] deferred: ...` with exit 0.
+17. Remote slots: `REMOTE_SLOTS="supabase-5"` in the Mac's config lists slots served by another
+   host. The heartbeat accepts those runner names in the tripwire (labels still checked), counts each
+   as one more slot of its class for saturation, and treats a remote runner that is busy OR
+   offline/absent as busy (an unreachable host adds no capacity, so jobs still spill to hosted). A
+   remote slot has no state file and never makes the state `down`. Entries must match
+   `(light|supabase)-<n>`, and `n` must be above the class's local count; others are ignored with a
+   log line. An unlisted `ghr-supabase-5` still latches the tripwire.
+18. Proxmox slot (`launch-pve`): runs as root via sudo because `qm` is root-only; `PVE_SLOTS` (not
+   `SUPABASE_SLOTS`, keep that 0 on that host) lists its slots and `slot-loop` accepts them through
+   `LAUNCH_USER=root` / `LAUNCH_BIN=.../launch-pve` set by the systemd unit. The Mac must not set
+   `PVE_SLOTS`. VMID = `PVE_VMID_BASE + n`; the sweep only destroys VMs whose name AND VMID range
+   match, and a different VM on the slot's VMID is never touched.
+19. `qm guest exec` is synchronous with its own `--timeout` (default 30 s); on expiry the guest
+   process keeps running but `qm` fails. So every step is bounded (`guest_exec` in `lib/pve-guest.sh`),
+   the JIT is written by a short `cat` (stdin via `--pass-stdin`, 1 MiB max), and the long-running
+   runner is started with `systemctl start --no-block`. The job's end is detected by polling
+   `qm status`; the guest writes the runner's exit code to `/var/lib/ghr/exit`, which the host reads
+   through the agent (every `PVE_EXIT_POLL_EVERY` polls) during a 60 s grace before the guest powers
+   off. A VM that powers off before the code is read is reported as exit 0.
+20. Per-VM firewall rules only apply when the NIC has `firewall=1` AND the datacenter firewall is
+   enabled (`/etc/pve/firewall/cluster.fw`, `enable: 1`; enabling it also applies the default
+   host rules, so allow management access first). `launch-pve` therefore never trusts the file: it
+   checks `firewall=1` on the clone and probes `LAN_PROBE` from inside the guest after cloud-init
+   finished (a guest whose network is not up yet would "cannot reach" anything). IPv6: only link-local
+   and ULA ranges are dropped; give the VM no global IPv6 route to the LAN. The golden's storage must
+   support linked clones (lvm-thin, zfs, qcow2 on a directory).

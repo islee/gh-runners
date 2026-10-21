@@ -1,0 +1,29 @@
+# ghr-slot@.service — one slot loop per instance, e.g. ghr-slot@supabase-5.service (Proxmox host).
+#
+# Template rendered by slots/install-pve.sh (@-delimited placeholders). The instance name is <class>-<n>; the
+# loop runs as the unprivileged controller account and reaches root only through the sudoers rule for
+# launch-pve (qm is root-only). KillMode=mixed + TimeoutStopSec mirror the macOS daemon: SIGTERM goes
+# to the loop alone, which finishes (or releases) its job before exiting; only after the timeout does
+# systemd kill the rest. NoNewPrivileges must stay off: sudo is setuid.
+[Unit]
+Description=ghr runner slot %i
+After=network-online.target pve-cluster.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=@CTL_USER@
+Environment=HOME=@CTL_HOME@
+Environment=GHR_STATE_DIR=@STATE_ROOT@/slots
+Environment=LAUNCH_USER=root
+Environment=LAUNCH_BIN=@LIBEXEC@/launch-pve
+ExecStart=@LIBEXEC@/slot-unit %i
+Restart=always
+RestartSec=30
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=21700
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -35,8 +35,8 @@ tied to one organization.
 
 ```
 gh-runners/
-├── slots/        # macOS host: JIT slot loops, Lima pool, heartbeat, installer (+ tests/, bats)
-├── images/       # runner images: light (container, hosted-parity tool cache) and supabase (Lima golden VM)
+├── slots/        # macOS host: JIT slot loops, Lima pool, heartbeat, installer; Proxmox slot (+ tests/, bats)
+├── images/       # runner images: light (container, hosted-parity tool cache) and supabase (Lima / Proxmox golden VM)
 ├── rescuer/      # off-pool container: cancels + re-runs jobs stranded on pool labels (+ tests/, pytest)
 ├── requirements-dev.txt   # gate deps (pytest, ruff)
 ├── .pre-commit-config.yaml  .hadolint.yaml  .github/   # gate = CI (same hooks)
@@ -44,6 +44,16 @@ gh-runners/
 ```
 
 Each directory has its own README with setup steps, key files and gotchas.
+
+## Optional second host (Proxmox VE)
+
+One extra `supabase`-class slot can run on a Proxmox VE 9 node (x86_64) with the same shape as the
+Mac's: a fresh VM linked-cloned from a stopped golden template for every job, the runner natively
+inside it, the VM destroyed on every exit path, LAN egress blocked by a per-VM Proxmox firewall file
+and proven from inside the guest before the job starts. It carries the same label, runs its own slot
+loop (`slots/install-pve.sh`, `slots/launch-pve.sh`, golden built by `images/build-supabase-pve.sh`)
+and publishes nothing: the Mac's heartbeat counts it through `REMOTE_SLOTS` as best-effort capacity
+that can never turn the state `down`.
 
 ## Credentials
 

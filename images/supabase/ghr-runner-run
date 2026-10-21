@@ -1,0 +1,43 @@
+#!/bin/bash
+# ghr-runner-run — run ONE JIT runner as user `runner`, record its exit code, power the VM off.
+#
+# Context: executed by ghr-runner.service inside a per-job VM (as root). The host (launch-pve) wrote
+# the JIT config to /run/ghr/jit over the qemu guest agent. Mirrors the Lima path of slots/launch.sh:
+# the runner reads the JIT from stdin and `exec`s ./run.sh --jitconfig.
+#
+# CRITICAL: the JIT config is never placed in argv or the environment: it is read into an unexported
+# shell variable, the file is deleted first, and it travels to the runner through a pipe (printf is a
+# builtin, so no process argv either).
+#
+# The exit code goes to /var/lib/ghr/exit BEFORE the grace period so the host can read it through the
+# guest agent; after GHR_POWEROFF_GRACE seconds (host did not collect it, or is gone) the VM powers
+# itself off, which the host also treats as "job finished".
+
+set -uo pipefail
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+
+JIT_FILE=/run/ghr/jit
+EXIT_FILE=/var/lib/ghr/exit
+GRACE="${GHR_POWEROFF_GRACE:-60}"
+
+umask 077
+install -d -m 0755 /var/lib/ghr
+rm -f "$EXIT_FILE"
+IFS= read -r J < "$JIT_FILE" || J=""
+rm -f "$JIT_FILE"
+
+rc=1
+if [ -n "$J" ]; then
+  printf '%s\n' "$J" | runuser -u runner -- env HOME=/home/runner USER=runner LOGNAME=runner \
+    AGENT_TOOLSDIRECTORY=/opt/hostedtoolcache RUNNER_TOOL_CACHE=/opt/hostedtoolcache \
+    bash -c 'cd /opt/actions-runner && read -r J && exec ./run.sh --jitconfig "$J"'
+  rc=$?
+fi
+J=""
+# Atomic: the host must never read a half-written number.
+printf '%s\n' "$rc" > "$EXIT_FILE.tmp" && mv -f "$EXIT_FILE.tmp" "$EXIT_FILE"
+chmod 0644 "$EXIT_FILE"
+sleep "$GRACE"
+systemctl poweroff --no-block
+exit "$rc"

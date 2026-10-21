@@ -54,6 +54,8 @@ ghr_load_config() {
   : "${SUPABASE_LABELS:=ghr-supabase}"
   : "${SUPA_MEM:=4GiB}"
   : "${SUPA_CPUS:=4}"
+  : "${REMOTE_SLOTS:=}"
+  : "${PVE_SLOTS:=}"
   : "${ORG:=}"
   [[ "$ORG" =~ ^[A-Za-z0-9][A-Za-z0-9-]*$ ]] || { ghr_log "ERROR ORG missing/invalid in config"; return 1; }
   [[ "$RUNNER_GROUP_ID" =~ ^[0-9]+$ ]] || { ghr_log "ERROR RUNNER_GROUP_ID must be numeric"; return 1; }

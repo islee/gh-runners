@@ -146,3 +146,115 @@ SHIM
   chmod +x "$FAKE_BIN/limactl"
   export LIMACTL="$FAKE_BIN/limactl"
 }
+
+# pve_setup — stateful `qm` shim for the Proxmox suites (launch-pve, build-supabase-pve). Per-VM state
+# lives in $QMSTATE/<vmid>/{name,status,template,exit}; the golden is VMID 300 (a template) unless
+# FAKE_GOLDEN_MISSING / FAKE_GOLDEN_NOT_TEMPLATE / FAKE_GOLDEN_NAME say otherwise. Every call is logged
+# to $QM_LOG (argv), its environment to $QM_ENV, stdin of `guest exec --pass-stdin` calls to $QM_STDIN,
+# and stdin of every OTHER call to $QM_OTHER_STDIN (must stay empty: no call may swallow the caller's
+# stdin). Knobs (env): FAKE_EXTRA_VMS ("vmid name" lines shown by `qm list`), FAKE_CLONE_RC/_SLEEP,
+# FAKE_SET_RC, FAKE_START_RC, FAKE_STOP_RC/_SLEEP, FAKE_DESTROY_RC, FAKE_DESTROY_PERSIST, FAKE_NO_FW
+# (clone without firewall=1), FAKE_AGENT_RC, FAKE_CI_RC, FAKE_PROBE_RC, FAKE_DELIVER_RC, FAKE_START_UNIT_RC,
+# FAKE_RUN_SLEEP (seconds until the guest "powers off"), FAKE_JOB_RC (exit code the guest reports),
+# FAKE_PROVISION_RC / FAKE_PROVISION_OUT (build suite). Also exports the launch-pve test overrides.
+pve_setup() {
+  QM_LOG="$W/qm.log"; QM_ENV="$W/qm.env"; QM_STDIN="$W/qm.stdin"; QM_OTHER_STDIN="$W/qm.other.stdin"
+  QMSTATE="$W/qmstate"; PVE_FW_DIR="$W/fw"
+  mkdir -p "$QMSTATE/300" "$PVE_FW_DIR" "$W/snippets"
+  : > "$QM_LOG"; : > "$QM_ENV"; : > "$QM_STDIN"; : > "$QM_OTHER_STDIN"
+  if [ -z "${FAKE_GOLDEN_MISSING:-}" ]; then
+    printf '%s' "${FAKE_GOLDEN_NAME:-ghr-supa-golden}" > "$QMSTATE/300/name"
+    echo stopped > "$QMSTATE/300/status"
+    [ -n "${FAKE_GOLDEN_NOT_TEMPLATE:-}" ] || : > "$QMSTATE/300/template"
+  else
+    rm -rf "$QMSTATE/300"
+  fi
+  export QM_LOG QM_ENV QM_STDIN QM_OTHER_STDIN QMSTATE PVE_FW_DIR
+  cat > "$FAKE_BIN/qm" <<'SHIM'
+#!/bin/bash
+echo "$*" >> "$QM_LOG"
+env >> "$QM_ENV"
+case "$*" in
+  *"--pass-stdin 1"*)
+    cat > "$QMSTATE/.stdin.$$"
+    cat "$QMSTATE/.stdin.$$" >> "$QM_STDIN"
+    # a file pushed with `bash -c 'cat > "$1" ...' _ <dest> <mode>` is kept under its basename
+    prev=""; for a in "$@"; do if [ "$prev" = _ ]; then mkdir -p "$QMSTATE/.pushed"; cp "$QMSTATE/.stdin.$$" "$QMSTATE/.pushed/$(basename "$a")"; fi; prev=$a; done
+    rm -f "$QMSTATE/.stdin.$$" ;;
+  *) cat >> "$QM_OTHER_STDIN" ;;
+esac
+cmd=$1; id=${2:-}
+[ "$cmd" != guest ] || id=${3:-}      # qm guest exec <vmid> ...
+d="$QMSTATE/$id"
+json() { printf '{"exitcode":%s,"exited":1,"out-data":"%s"}\n' "$1" "$2"; }
+case "$cmd" in
+  config)
+    [ -d "$d" ] || exit 2
+    echo "name: $(cat "$d/name")"
+    [ ! -e "$d/template" ] || echo "template: 1"
+    if [ -n "${FAKE_NO_FW:-}" ]; then echo "net0: virtio=BC:24:11:00:00:01,bridge=vmbr0"; else echo "net0: virtio=BC:24:11:00:00:01,bridge=vmbr0,firewall=1"; fi ;;
+  status)
+    [ -d "$d" ] || { echo "Configuration file 'nodes/pve/qemu-server/$id.conf' does not exist" >&2; exit 2; }
+    echo "status: $(cat "$d/status")" ;;
+  list)
+    echo "      VMID NAME                 STATUS     MEM(MB)    BOOTDISK(GB) PID"
+    for v in "$QMSTATE"/*/; do
+      v=${v%/}; [ -d "$v" ] || continue
+      printf '%10s %-20s %-10s 4096 40.00 0\n' "$(basename "$v")" "$(cat "$v/name")" "$(cat "$v/status")"
+    done
+    printf '%s\n' "${FAKE_EXTRA_VMS:-}" | while read -r vmid name; do
+      [ -n "$vmid" ] && printf '%10s %-20s %-10s 4096 40.00 0\n' "$vmid" "$name" stopped
+    done ;;
+  clone)
+    new=$3
+    sleep "${FAKE_CLONE_SLEEP:-0}"
+    mkdir -p "$QMSTATE/$new"
+    name=""; shift 3
+    while [ $# -gt 0 ]; do case "$1" in --name) name=$2; shift 2 ;; *) shift ;; esac; done
+    printf '%s' "$name" > "$QMSTATE/$new/name"; echo stopped > "$QMSTATE/$new/status"
+    exit "${FAKE_CLONE_RC:-0}" ;;
+  create)
+    [ "${FAKE_CREATE_RC:-0}" -eq 0 ] || exit "$FAKE_CREATE_RC"
+    mkdir -p "$d"; echo stopped > "$d/status"
+    shift 2; while [ $# -gt 0 ]; do case "$1" in --name) printf '%s' "$2" > "$d/name"; shift 2 ;; *) shift ;; esac; done ;;
+  set) exit "${FAKE_SET_RC:-0}" ;;
+  resize) exit "${FAKE_RESIZE_RC:-0}" ;;
+  shutdown) [ -n "${FAKE_SHUTDOWN_STICKY:-}" ] || echo stopped > "$d/status"; exit "${FAKE_SHUTDOWN_RC:-0}" ;;
+  template) [ "${FAKE_TEMPLATE_RC:-0}" -eq 0 ] && : > "$d/template"; exit "${FAKE_TEMPLATE_RC:-0}" ;;
+  start)
+    # the firewall file must exist BEFORE the first boot
+    [ -f "$PVE_FW_DIR/$id.fw" ] && cp "$PVE_FW_DIR/$id.fw" "$d/fw-at-start"
+    echo running > "$d/status"; exit "${FAKE_START_RC:-0}" ;;
+  stop)
+    sleep "${FAKE_STOP_SLEEP:-0}"
+    [ -d "$d" ] || exit 0
+    [ "${FAKE_STOP_RC:-0}" -eq 0 ] && echo stopped > "$d/status"
+    exit "${FAKE_STOP_RC:-0}" ;;
+  destroy)
+    if [ "${FAKE_DESTROY_RC:-0}" -eq 0 ] && [ -z "${FAKE_DESTROY_PERSIST:-}" ]; then rm -rf "$d"; fi
+    exit "${FAKE_DESTROY_RC:-0}" ;;
+  agent) exit "${FAKE_AGENT_RC:-0}" ;;
+  guest)
+    case "$*" in
+      *"cloud-init status"*) json "${FAKE_CI_RC:-0}" "" ;;
+      *dev/tcp*) json "${FAKE_PROBE_RC:-1}" "" ;;
+      *"/run/ghr/jit"*) json "${FAKE_DELIVER_RC:-0}" "" ;;
+      *"PROVISION-OK"*) json 0 "${FAKE_PROVISION_OUT-PROVISION-OK 2.338.0 2.107.0}\\n" ;;
+      *"cat /var/lib/ghr-provision.rc"*) json 0 "${FAKE_PROVISION_RC:-0}\\n" ;;
+      *"tail -n 40"*) json 0 "provision log tail\\n" ;;
+      *"systemctl start"*)
+        if [ -n "${FAKE_JOB_RC:-}" ]; then echo "$FAKE_JOB_RC" > "$d/exit"; fi
+        # the guest "powers off" FAKE_RUN_SLEEP seconds later (0 = immediately)
+        if [ "${FAKE_RUN_SLEEP:-0}" = 0 ]; then echo stopped > "$d/status"
+        else ( sleep "$FAKE_RUN_SLEEP"; [ -d "$d" ] && echo stopped > "$d/status" ) > /dev/null 2>&1 3>&- & fi
+        json "${FAKE_START_UNIT_RC:-0}" "" ;;
+      *"/var/lib/ghr/exit"*)
+        if [ -f "$d/exit" ]; then json 0 "$(cat "$d/exit")\\n"; else json 1 ""; fi ;;
+      *) json 0 "" ;;
+    esac ;;
+  *) exit 0 ;;
+esac
+SHIM
+  chmod +x "$FAKE_BIN/qm"
+  export QM="$FAKE_BIN/qm"
+}

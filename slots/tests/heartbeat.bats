@@ -389,3 +389,120 @@ PY
   # both repos get the identical value
   [ "$(grep -c '"value":"down@' "$CURL_LOG")" -eq 2 ]
 }
+
+# ── remote slots (REMOTE_SLOTS: slots served by another host) ──────────────────
+
+# remote_fixture LOCAL_BUSY REMOTE_ROW — light 3 idle + supabase 1,2 local (fresh) with LOCAL_BUSY
+# flag, plus an optional extra TSV row for ghr-supabase-5 (empty = runner absent on GitHub).
+remote_fixture() {
+  two_classes false "$1"
+  if [ -n "$2" ]; then printf '%s\n' "$2" >> "$RUNNERS"; fi
+}
+remote_row() { printf '9\tghr-supabase-5\t%s\t%s\tghr-supabase' "$1" "$2"; }
+
+@test "remote tripwire: a listed remote runner is accepted; an unlisted ghr-supabase-5 is still flagged" {
+  SUPABASE_SLOTS=2
+  row="$(printf '9\tghr-supabase-5\tonline\tfalse\tghr-supabase')"
+  out=$(printf '%s\n' "$row" | tripwire_names)
+  [ "$out" = "ghr-supabase-5" ]
+  REMOTE_SLOTS="supabase-5"
+  out=$(printf '%s\n' "$row" | tripwire_names)
+  [ -z "$out" ]
+  # comma lists work, other numbers stay flagged
+  REMOTE_SLOTS="supabase-6,supabase-5"
+  out=$(printf '%s\n' "$row" "$(printf '8\tghr-supabase-7\tonline\tfalse\tghr-supabase')" | tripwire_names)
+  [ "$out" = "ghr-supabase-7" ]
+}
+
+@test "remote tripwire: the label check still applies to a listed remote runner" {
+  SUPABASE_SLOTS=2
+  REMOTE_SLOTS="supabase-5"
+  out=$(printf '%s\n' "$(printf '9\tghr-supabase-5\tonline\tfalse\tghr-light')" | tripwire_names)
+  [ "$out" = "ghr-supabase-5" ]
+}
+
+@test "remote tripwire: a remote entry of the other class does not whitelist this class; invalid entries are ignored" {
+  SUPABASE_SLOTS=2
+  REMOTE_SLOTS="light-3 supabase-x supabase-0 ghr-supabase-5 supabase-03"
+  out=$(printf '%s\n' "$(printf '9\tghr-supabase-5\tonline\tfalse\tghr-supabase')" | tripwire_names)
+  [ "$out" = "ghr-supabase-5" ]
+}
+
+@test "remote tripwire: an entry colliding with a local slot number (n <= local count) is ignored with a log line" {
+  SUPABASE_SLOTS=3
+  REMOTE_SLOTS="supabase-3 supabase-5"
+  run remote_nums supabase 3
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"supabase-3 collides with a local slot"* ]]
+  [ "$(remote_nums supabase 3 2> /dev/null)" = "5" ]
+  # the Mac growing to 4 local slots: 4 collides too, 5 still passes (the remote number may exceed launch.sh's SUPA_MAX)
+  SUPABASE_SLOTS=4
+  REMOTE_SLOTS="supabase-4 supabase-5"
+  [ "$(remote_nums supabase 4 2> /dev/null)" = "5" ]
+  out=$(printf '%s\n' "$(printf '9\tghr-supabase-4\tonline\tfalse\tghr-supabase')" | tripwire_names)
+  [ -z "$out" ]    # local slot 4: valid by the local count
+  SUPABASE_SLOTS=3
+  REMOTE_SLOTS="supabase-5"
+  out=$(printf '%s\n' "$(printf '9\tghr-supabase-4\tonline\tfalse\tghr-supabase')" | tripwire_names)
+  [ "$out" = "ghr-supabase-4" ]   # beyond 3 local and listed nowhere
+  REMOTE_SLOTS="supabase-5 supabase-5 bogus"
+  [ "$(remote_nums supabase 3 2> /dev/null)" = "5" ]
+  run remote_nums supabase 3
+  [[ "$output" == *"invalid entry 'bogus'"* ]]
+}
+
+@test "remote saturation: 2 local busy + remote idle -> NOT saturated" {
+  STALE_SECS=100000
+  REMOTE_SLOTS="supabase-5"
+  remote_fixture true "$(remote_row online false)"
+  [ "$(compute "$NOW")" = "ok" ]
+  [ "$(compute "$((NOW + 600))")" = "ok" ]
+  [ ! -e "$HB/all_busy_since_supabase" ]
+}
+
+@test "remote saturation: 2 local busy + remote busy -> ok/sat=supabase only after SATURATED_SECS" {
+  STALE_SECS=100000
+  REMOTE_SLOTS="supabase-5"
+  remote_fixture true "$(remote_row online true)"
+  [ "$(compute "$NOW")" = "ok" ]
+  [ "$(compute "$((NOW + 59))")" = "ok" ]
+  [ "$(compute "$((NOW + 60))")" = "ok/sat=supabase" ]
+}
+
+@test "remote saturation: an offline or absent remote runner counts as busy (no capacity)" {
+  STALE_SECS=100000
+  REMOTE_SLOTS="supabase-5"
+  remote_fixture true "$(remote_row offline false)"
+  [ "$(compute "$NOW")" = "ok" ]
+  [ "$(compute "$((NOW + 60))")" = "ok/sat=supabase" ]
+  rm -f "$HB"/all_busy_since_supabase
+  remote_fixture true ""
+  [ "$(compute "$NOW")" = "ok" ]
+  [ "$(compute "$((NOW + 60))")" = "ok/sat=supabase" ]
+}
+
+@test "remote saturation: without REMOTE_SLOTS the same fixture saturates on the two local slots alone" {
+  STALE_SECS=100000
+  remote_fixture true "$(remote_row online false)"
+  [ "$(compute "$NOW")" = "ok" ]
+  [ "$(compute "$((NOW + 60))")" = "ok/sat=supabase" ]
+}
+
+@test "remote slots never cause down: no state file, offline, stale-looking, or not reachable at all" {
+  STALE_SECS=100000
+  REMOTE_SLOTS="supabase-5"
+  remote_fixture false ""
+  [ ! -e "$W/state/supabase-5.json" ]
+  [ "$(compute "$NOW")" = "ok" ]
+  [ "$(compute "$((NOW + 600))")" = "ok" ]
+  remote_fixture false "$(remote_row offline false)"
+  [ "$(compute "$((NOW + 1200))")" = "ok" ]
+}
+
+@test "remote slots: a remote-only class does not rescue a pool with no local slots (still down)" {
+  LIGHT_SLOTS=0
+  SUPABASE_SLOTS=0
+  REMOTE_SLOTS="supabase-5"
+  : > "$RUNNERS"
+  [ "$(compute)" = "down" ]
+}

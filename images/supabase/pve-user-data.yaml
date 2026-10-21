@@ -1,0 +1,14 @@
+#cloud-config
+# pve-user-data.yaml — cloud-init user-data for the FIRST boot of the Proxmox golden VM.
+#
+# Context: uploaded as a `cicustom` snippet by images/build-supabase-pve.sh. Its only job is to get
+# qemu-guest-agent running, because every later build and launch step talks to the VM through the
+# agent (no ssh, no keys, no inbound network). Everything else is done by provision.sh over the agent.
+# A cicustom user-data REPLACES the user-data Proxmox would generate, so no user or password is
+# configured: the agent runs as root, and the Ubuntu cloud image has root login disabled.
+# The build swaps this for a no-op snippet before templating, so clones do not re-run apt.
+package_update: true
+packages:
+  - qemu-guest-agent
+runcmd:
+  - [systemctl, enable, --now, qemu-guest-agent]
