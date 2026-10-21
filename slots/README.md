@@ -85,7 +85,10 @@ Operator clears a tripwire by deleting `/var/db/ghr/tripwire` after removing the
 8. `sudo` may leave the caller's `HOME`; `launch` re-derives `ghr`'s home before touching Lima.
 9. Tripwire: a foreign runner name, a slot number beyond the configured count, or custom labels
    differing from the class label are latched in `/var/db/ghr/tripwire`; while it exists the
-   published state is `down`. Delete the file after fixing the org.
+   published state is `down`. Delete the file after fixing the org. Exception for scale-down: a slot
+   above the count is *retiring*, not foreign, while its own loop keeps its state file fresh
+   (`RETIRE_SECS`, 180 s), so lowering `LIGHT_SLOTS`/`SUPABASE_SLOTS` doesn't trip on runners it is
+   still releasing.
 10. `launch` and `pool` are installed with `GHR_INSTALLED=1`, which makes them ignore every
    override variable (LIMACTL, GHR_CONFIG, TMPDIR, ...); the repo copy honours them for tests.
    The sudoers drop-in also sets `!setenv` and a fixed `secure_path`.
