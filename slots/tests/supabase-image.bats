@@ -352,6 +352,14 @@ bb() { bash "$(BUILD)" "$@" 2> /dev/null; }
   grep -q 'AGENT_TOOLSDIRECTORY=/opt/hostedtoolcache RUNNER_TOOL_CACHE=/opt/hostedtoolcache' "$f"
 }
 
+@test "ghr-runner-run: the job runs under umask 022 so containers can read the checkout" {
+  f="$(IMG ghr-runner-run)"
+  u=$(grep -n '^umask 022$' "$f" | head -1 | cut -d: -f1)
+  r=$(grep -n 'runuser -u runner' "$f" | head -1 | cut -d: -f1)
+  [ -n "$u" ] && [ "$u" -lt "$r" ]
+  refute grep -qE '^[[:space:]]*umask 0?[0-7]7' "$f"
+}
+
 @test "ghr-runner-run: the exit code is written atomically BEFORE the grace period, then the VM powers off" {
   f="$(IMG ghr-runner-run)"
   e=$(grep -n 'mv -f "\$EXIT_FILE.tmp" "\$EXIT_FILE"' "$f" | head -1 | cut -d: -f1)
