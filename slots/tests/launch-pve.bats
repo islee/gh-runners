@@ -335,8 +335,8 @@ line_of() { grep -n -F -e "$1" "$QM_LOG" | head -1 | cut -d: -f1; }
 }
 
 @test "launch-pve is bash-5 only but must not hardcode org names, LAN addresses or key material" {
-  a="lin""ple"; b="gyeol""hada"; c="BEGIN [A-Z ]*PRIV""ATE KEY"; d="192\.168\.[0-9]"
-  refute grep -niE "$a|$b|$c|mind2" "$SLOTS_DIR/launch-pve.sh" "$SLOTS_DIR/install-pve.sh" "$SLOTS_DIR/slot-unit.sh" "$SLOTS_DIR"/lib/pve-*.sh "$SLOTS_DIR"/systemd/* "$SLOTS_DIR/../images/build-supabase-pve.sh" "$SLOTS_DIR"/../images/supabase/*
+  a="lin""ple"; b="gyeol""hada"; c="BEGIN [A-Z ]*PRIV""ATE KEY"; d="192\.168\.[0-9]"; m="min""d2"
+  refute grep -niE "$a|$b|$c|$m" "$SLOTS_DIR/launch-pve.sh" "$SLOTS_DIR/install-pve.sh" "$SLOTS_DIR/slot-unit.sh" "$SLOTS_DIR"/lib/pve-*.sh "$SLOTS_DIR"/systemd/* "$SLOTS_DIR/../images/build-supabase-pve.sh" "$SLOTS_DIR"/../images/supabase/*
   # the firewall template legitimately names the private ranges; nothing else may carry a LAN address
   refute grep -nE "$d" "$SLOTS_DIR/launch-pve.sh" "$SLOTS_DIR/install-pve.sh" "$SLOTS_DIR/slot-unit.sh" "$SLOTS_DIR"/systemd/* "$SLOTS_DIR/../images/build-supabase-pve.sh" "$SLOTS_DIR"/../images/supabase/*
 }
