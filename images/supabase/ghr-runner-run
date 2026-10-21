@@ -21,7 +21,11 @@ JIT_FILE=/run/ghr/jit
 EXIT_FILE=/var/lib/ghr/exit
 GRACE="${GHR_POWEROFF_GRACE:-60}"
 
-umask 077
+# CRITICAL: 022, not 077. The runner (and so the job's checkout) inherits this umask, and the
+# Supabase containers run as other uids that must read the bind-mounted supabase/ files: under 077
+# kong could not read its email templates and the edge runtime / rest-admin health checks never
+# answered, so `supabase start` hung (first live job, 2026-10-21). The JIT never touches disk here.
+umask 022
 install -d -m 0755 /var/lib/ghr
 rm -f "$EXIT_FILE"
 IFS= read -r J < "$JIT_FILE" || J=""
