@@ -152,6 +152,26 @@ compute() { compute_state "$W/state" "${1:-$NOW}" "$RUNNERS" "$HB"; }
   [ "$out" = "$(printf 'ghr-light-4\nghr-light-0\nghr-light-99999999999\nghr-light-1\nghr-light-2\nghr-supabase-1')" ]
 }
 
+@test "tripwire: a slot above the count is retiring only while its own loop keeps its state file fresh" {
+  # LIGHT_SLOTS=3: light-4 was just removed by a scale-down; its loop wrote 10 s ago -> not foreign
+  slot 4 registered 10 5000
+  out=$(printf '1\tghr-light-4\tonline\tfalse\tghr-light\n' | tripwire_names "$NOW")
+  [ -z "$out" ]
+  # grace runs out once the loop stops writing
+  slot 4 idle "$((RETIRE_SECS + 1))" 5000
+  out=$(printf '1\tghr-light-4\tonline\tfalse\tghr-light\n' | tripwire_names "$NOW")
+  [ "$out" = "ghr-light-4" ]
+  # no state file at all (never one of ours), a future ts, or wrong labels -> foreign
+  out=$(printf '1\tghr-light-5\tonline\tfalse\tghr-light\n' | tripwire_names "$NOW")
+  [ "$out" = "ghr-light-5" ]
+  slot 4 registered -60 5000
+  out=$(printf '1\tghr-light-4\tonline\tfalse\tghr-light\n' | tripwire_names "$NOW")
+  [ "$out" = "ghr-light-4" ]
+  slot 4 registered 10 5000
+  out=$(printf '1\tghr-light-4\tonline\tfalse\tghr-light,extra\n' | tripwire_names "$NOW")
+  [ "$out" = "ghr-light-4" ]
+}
+
 @test "variable write: PATCH on the repo; POST to create when PATCH 404s" {
   route_token
   route PATCH /repos/test-org/repo-a/actions/variables/SELF_HOSTED_STATE 204 ''

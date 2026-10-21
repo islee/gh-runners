@@ -43,6 +43,8 @@ STUCK_SECS="${STUCK_SECS:-45}"
 # Tolerated clock skew between a slot file and this process.
 FUTURE_SECS="${FUTURE_SECS:-5}"
 SATURATED_SECS="${SATURATED_SECS:-60}"
+# Grace for a slot above the configured count whose loop is still releasing its runner (see retiring).
+RETIRE_SECS="${RETIRE_SECS:-180}"
 STATE_VAR_NAME="${STATE_VAR_NAME:-SELF_HOSTED_STATE}"
 
 # Slot files are our own fixed-format single-line JSON, so sed is enough (no python per slot).
@@ -143,13 +145,28 @@ expected_labels() {
   esac
 }
 
-# tripwire_names < tsv — print names of runners that do not belong to this fleet:
+# retiring CLASS N NOW — 0 when slot CLASS-N above the configured count is still draining: its own
+# slot loop wrote a fresh, non-future state file within RETIRE_SECS.
+# WHY: lowering LIGHT_SLOTS/SUPABASE_SLOTS takes effect at the next heartbeat, but a removed slot's
+# loop needs up to one tick to release its idle runner (or a whole job to finish a busy one). Without
+# this the heartbeat latched its own just-removed runners as foreign (ghr-light-5/6, 2026-10-21).
+# NOTE: the state dir is written only by the controller account, so a runner registered from outside
+# the mini cannot claim a slot this way; once the loop stops writing, the grace runs out.
+retiring() {
+  local f="$GHR_STATE_DIR/$1-$2.json" ts
+  [ -r "$f" ] || return 1
+  ts=$(state_field_num "$f" ts)
+  [ -n "$ts" ] && [ "$(($3 - ts))" -le "$RETIRE_SECS" ] && [ "$((ts - $3))" -le "$FUTURE_SECS" ]
+}
+
+# tripwire_names [NOW] < tsv — print names of runners that do not belong to this fleet:
 #   - name not matching ghr-(light|supabase)-<n>
-#   - <n> outside 1..<configured slot count> for its class (LIGHT_SLOTS / SUPABASE_SLOTS)
+#   - <n> outside 1..<configured slot count> for its class (LIGHT_SLOTS / SUPABASE_SLOTS),
+#     unless the slot is retiring (see retiring)
 #   - custom labels different from the configured label set for its class
 # WHY: a foreign or copied runner in the org can steal jobs meant for the pool.
 tripwire_names() {
-  local id name status busy labels class num count want
+  local now=${1:-$(date -u +%s)} id name status busy labels class num count want
   while IFS=$'\t' read -r id name status busy labels; do
     [ -n "$id$name" ] || continue
     ghr_valid_runner_name "$name" || { printf '%s\n' "$name"; continue; }
@@ -157,11 +174,14 @@ tripwire_names() {
     num=${name##*-}
     case $class in light) count=${LIGHT_SLOTS:-0} ;; supabase) count=${SUPABASE_SLOTS:-0} ;; *) count=0 ;; esac
     # >6 digits cannot be a real slot number (and would overflow shell arithmetic)
-    if [ "${#num}" -gt 6 ] || [ "$((10#$num))" -lt 1 ] || [ "$((10#$num))" -gt "$count" ]; then
+    if [ "${#num}" -gt 6 ] || [ "$((10#$num))" -lt 1 ]; then
       printf '%s\n' "$name"; continue
     fi
     want=$(expected_labels "$class")
-    [ "$labels" = "$want" ] || printf '%s\n' "$name"
+    [ "$labels" = "$want" ] || { printf '%s\n' "$name"; continue; }
+    if [ "$((10#$num))" -gt "$count" ] && ! retiring "$class" "$((10#$num))" "$now"; then
+      printf '%s\n' "$name"
+    fi
   done
 }
 
@@ -188,7 +208,7 @@ main() {
   now=$(date -u +%s)
   state=$(compute_state "$GHR_STATE_DIR" "$now" "$tmp" "$GHR_HB_ROOT/hb")
   ghr_log "state=$state"
-  bad=$(tripwire_names < "$tmp")
+  bad=$(tripwire_names "$now" < "$tmp")
   if [ -n "$bad" ]; then
     ghr_log "TRIPWIRE foreign runner(s) in org: $(printf '%s' "$bad" | tr '\n' ' ' | head -c 300)"
     { date -u +%Y-%m-%dT%H:%M:%SZ; printf '%s\n' "$bad"; } > "$GHR_HB_ROOT/tripwire" 2> /dev/null \
