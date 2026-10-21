@@ -111,6 +111,7 @@ plan() { bash "$(IPVE)" --dry-run --config "$W/pve.env" "$@" 2>&1; }
 }
 
 @test "rendered unit has no leftover placeholders" {
+  # shellcheck source=slots/install-pve.sh
   source "$(IPVE)"
   render_unit "$SLOTS_DIR/systemd/ghr-slot@.service" "$W/unit" CTL_USER=ghrctl CTL_HOME=/var/lib/ghrctl STATE_ROOT=/var/lib/ghr LIBEXEC=/usr/local/libexec/ghr
   refute grep -q '@[A-Z_]*@' "$W/unit"
