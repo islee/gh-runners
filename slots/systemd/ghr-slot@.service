@@ -2,9 +2,12 @@
 #
 # Template rendered by slots/install-pve.sh (@-delimited placeholders). The instance name is <class>-<n>; the
 # loop runs as the unprivileged controller account and reaches root only through the sudoers rule for
-# launch-pve (qm is root-only). KillMode=mixed + TimeoutStopSec mirror the macOS daemon: SIGTERM goes
-# to the loop alone, which finishes (or releases) its job before exiting; only after the timeout does
-# systemd kill the rest. NoNewPrivileges must stay off: sudo is setuid.
+# launch-pve (qm is root-only). KillMode=process + TimeoutStopSec mirror the macOS daemon
+# (AbandonProcessGroup + ExitTimeOut): SIGTERM goes to the loop alone, which finishes (or releases) its
+# job before exiting. CRITICAL: not `mixed` -- that SIGKILLs the root launch-pve the moment the loop
+# exits, skipping its EXIT-trap destroy and leaking the job VM (first live stop, 2026-10-21). With
+# `process` launch-pve outlives the loop, sees the VM power off and destroys it; the next cycle's
+# sweep / leftover check covers anything else. NoNewPrivileges must stay off: sudo is setuid.
 [Unit]
 Description=ghr runner slot %i
 After=network-online.target pve-cluster.service
@@ -20,7 +23,7 @@ Environment=LAUNCH_BIN=@LIBEXEC@/launch-pve
 ExecStart=@LIBEXEC@/slot-unit %i
 Restart=always
 RestartSec=30
-KillMode=mixed
+KillMode=process
 KillSignal=SIGTERM
 TimeoutStopSec=21700
 PrivateTmp=yes
