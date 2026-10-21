@@ -1,0 +1,17 @@
+# ghr-runner.service — guest side of the Proxmox per-job VM (slots/launch-pve.sh starts it).
+#
+# Not enabled at boot: the host delivers the JIT config to /run/ghr/jit (tmpfs) over the guest agent
+# and then starts this unit once. ConditionPathExists keeps a stray manual start harmless.
+# Installed with ghr-runner-run into the golden by images/build-supabase-pve.sh.
+[Unit]
+Description=ghr single-use JIT runner (one job, then power off)
+After=network-online.target docker.service
+Wants=network-online.target
+ConditionPathExists=/run/ghr/jit
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/ghr-runner-run
+# A job can legitimately run for GitHub's 6 h maximum; the host enforces the real bound.
+TimeoutStartSec=infinity
+RemainAfterExit=no

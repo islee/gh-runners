@@ -17,6 +17,9 @@
 # abandoned instead of waiting up to 6 h for a job; if it IS busy the current job finishes
 # first. A SECOND signal kills the launch immediately.
 #
+# Linux / Proxmox host: LAUNCH_USER=root and LAUNCH_BIN=/usr/local/libexec/ghr/launch-pve (set in the
+# systemd unit by install-pve.sh); the slot range then comes from PVE_SLOTS instead of SUPABASE_SLOTS.
+#
 # Dependencies: lib/gh-app.sh, mint-jit.sh, reconcile.sh, /usr/local/libexec/ghr/launch via sudo.
 
 set -uo pipefail
@@ -27,6 +30,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 GHR_STATE_DIR="${GHR_STATE_DIR:-/var/db/ghr/slots}"
 LAUNCH_BIN="${LAUNCH_BIN:-/usr/local/libexec/ghr/launch}"
+# macOS: the launch script runs as `ghr` (owner of the Lima VMs); Proxmox: as root (qm is root-only).
+LAUNCH_USER="${LAUNCH_USER:-ghr}"
 TICK="${TICK:-15}"
 BACKOFF_MIN=30
 BACKOFF_MAX=300
@@ -86,7 +91,7 @@ do_mint() {
 # do_release NAME — un-register this slot's own idle runner. 0 = deleted/absent, 10 = busy.
 do_release() { "$(sibling reconcile)" --release "$1"; }
 # do_launch — JIT on stdin, never argv/env. Reads the JIT from the global JIT.
-do_launch() { printf '%s\n' "$JIT" | sudo -n -u ghr "$LAUNCH_BIN" "$CLASS" "$N"; }
+do_launch() { printf '%s\n' "$JIT" | sudo -n -u "$LAUNCH_USER" "$LAUNCH_BIN" "$CLASS" "$N"; }
 
 # backoff_wait SECONDS — nap in <= TICK chunks, refreshing the state file each chunk so the
 # heartbeat does not mistake a backing-off (but alive) loop for a wedged one. Wakes early on a
@@ -156,6 +161,13 @@ run_cycle() {
   return 0
 }
 
+# pve_slot_listed N — true iff N is in PVE_SLOTS (space/comma separated list of slot numbers).
+pve_slot_listed() {
+  local s rs=${PVE_SLOTS:-}
+  for s in ${rs//,/ }; do [ "$s" = "$1" ] && return 0; done
+  return 1
+}
+
 main() {
   [ "$#" -eq 2 ] || { echo "usage: slot-loop.sh <class> <n>" >&2; exit 2; }
   CLASS=$1
@@ -165,7 +177,11 @@ main() {
   ghr_load_config || exit 1
   local max
   case "$CLASS" in light) max=$LIGHT_SLOTS ;; supabase) max=$SUPABASE_SLOTS ;; esac
-  [ "$N" -le "$max" ] || { echo "slot-loop: slot beyond configured ${CLASS} slots" >&2; exit 2; }
+  # NOTE: on the Proxmox host SUPABASE_SLOTS is 0 and the supabase slots are PVE_SLOTS (a list).
+  if ! [ "$N" -le "$max" ] && ! { [ "$CLASS" = supabase ] && pve_slot_listed "$N"; }; then
+    echo "slot-loop: slot beyond configured ${CLASS} slots" >&2
+    exit 2
+  fi
   ghr_valid_runner_name "ghr-$CLASS-$N" || exit 2
   trap on_signal TERM INT
   local backoff=0

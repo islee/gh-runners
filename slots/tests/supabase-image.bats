@@ -12,10 +12,70 @@ setup() { slots_setup; }
 
 # ── provision.sh ──────────────────────────────────────────────────────────────
 
-@test "provision: runner is the pinned linux-arm64 release, checksum-verified before extraction" {
+# arch_vars ARCH — resolve the pinned values provision.sh selects for `uname -m` = ARCH, printed as
+# KEY=VALUE lines, WITHOUT running the script (only the pin block is evaluated, uname is faked).
+arch_vars() {
+  bash -c '
+    fake_arch=$1
+    uname() { echo "$fake_arch"; }
+    eval "$(sed -n "/^RUNNER_VERSION=/,/^PYTHON_SPECS=/p" "$2")"
+    for k in TC_ARCH NODE_ARCH DENO_TARGET RUNNER_ARCH CLI_ARCH PY_ARCH RUNNER_SHA256 CLI_SHA256 NODE_SPECS DENO_SPECS PYTHON_SPECS; do
+      printf "%s=%s\n" "$k" "${!k}"
+    done' _ "$1" "$(IMG provision.sh)"
+}
+
+@test "provision: arm64 (aarch64) keeps its exact pins and suffixes" {
+  out="$(arch_vars aarch64)"
+  grep -qx 'TC_ARCH=arm64' <<< "$out"
+  grep -qx 'NODE_ARCH=arm64' <<< "$out"
+  grep -qx 'DENO_TARGET=aarch64-unknown-linux-gnu' <<< "$out"
+  grep -qx 'RUNNER_ARCH=arm64' <<< "$out"
+  grep -qx 'CLI_ARCH=arm64' <<< "$out"
+  grep -qx 'PY_ARCH=arm64' <<< "$out"
+  grep -qx 'RUNNER_SHA256=628b4a7258487b80c1d3c221095a7ded349f5ae0175fd3dfab708d07428f041b' <<< "$out"
+  grep -qx 'CLI_SHA256=d54648dd7f46ab824ba483bf4db712235a58c3242c2ff675ac7732a9b4f21e0f' <<< "$out"
+  grep -qx 'NODE_SPECS=20.20.2|73093db209e4e9e09dd7d15a47aeaab1b74833830df03efa5f942a1122c5fa71 22.23.3|a44aeb94849a299b22df10b9e622ec2f605c2183501bc40590705131de7c740f 24.22.0|fef00bb4d36e1c50104a9775a10359beee98f162b4104dd12472c75065c6a143' <<< "$out"
+  grep -qx 'DENO_SPECS=2.6.8|09a0a800be639986515540ddae2f2752625ed412f63d36c7152c2a72ee78c2d7 2.9.7|c832298b1ad4422481334855f6003e0f54145762c5a134f20a489511d2f65bbf' <<< "$out"
+  grep -q '^PYTHON_SPECS=3.11.17-36876195594|a7a7bb9e6b50483f393d1c44c87aa87677a0464a9e3b07f33ee5b31ce155c6ef ' <<< "$out"
+}
+
+@test "provision: x86_64 selects the x64 artifact set with its OWN pinned sha256 values (same versions)" {
+  arm="$(arch_vars aarch64)"
+  out="$(arch_vars x86_64)"
+  grep -qx 'TC_ARCH=x64' <<< "$out"
+  grep -qx 'NODE_ARCH=x64' <<< "$out"
+  grep -qx 'DENO_TARGET=x86_64-unknown-linux-gnu' <<< "$out"
+  grep -qx 'RUNNER_ARCH=x64' <<< "$out"
+  grep -qx 'CLI_ARCH=amd64' <<< "$out"
+  grep -qx 'PY_ARCH=x64' <<< "$out"
+  grep -Eqx 'RUNNER_SHA256=[0-9a-f]{64}' <<< "$out"
+  grep -Eqx 'CLI_SHA256=[0-9a-f]{64}' <<< "$out"
+  grep -Eqx 'NODE_SPECS=20\.20\.2\|[0-9a-f]{64} 22\.23\.3\|[0-9a-f]{64} 24\.22\.0\|[0-9a-f]{64}' <<< "$out"
+  grep -Eqx 'DENO_SPECS=2\.6\.8\|[0-9a-f]{64} 2\.9\.7\|[0-9a-f]{64}' <<< "$out"
+  for py in 3.11.17-36876195594 3.12.15-36805895057 3.13.16-36805956071; do grep -Eq "^PYTHON_SPECS=.*${py}\|[0-9a-f]{64}" <<< "$out"; done
+  # every sha256 differs from the arm64 one (a copy-paste of the arm64 pin would fail the download)
+  for k in RUNNER_SHA256 CLI_SHA256; do
+    [ "$(grep "^$k=" <<< "$out")" != "$(grep "^$k=" <<< "$arm")" ]
+  done
+  for h in $(grep -E '^(NODE|DENO|PYTHON)_SPECS=' <<< "$out" | grep -oE '[0-9a-f]{64}'); do
+    refute grep -q "$h" <<< "$arm"
+  done
+}
+
+@test "provision: an unsupported architecture is refused before anything is installed" {
+  run bash -c 'uname() { echo riscv64; }; eval "$(sed -n "/^RUNNER_VERSION=/,/^PYTHON_SPECS=/p" "$1")"' _ "$(IMG provision.sh)"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"unsupported architecture: riscv64"* ]]
+}
+
+@test "provision: qemu-guest-agent is installed (Proxmox drives the VM through it)" {
+  grep -q 'qemu-guest-agent' "$(IMG provision.sh)"
+}
+
+@test "provision: runner is the pinned release, checksum-verified before extraction" {
   grep -Eq '^RUNNER_VERSION="\$\{RUNNER_VERSION:-2\.338\.0\}"' "$(IMG provision.sh)"
-  grep -Eq '^RUNNER_SHA256="\$\{RUNNER_SHA256:-[0-9a-f]{64}\}"' "$(IMG provision.sh)"
-  grep -q 'actions-runner-linux-arm64-${RUNNER_VERSION}.tar.gz' "$(IMG provision.sh)"
+  grep -Eq '^RUNNER_SHA256="\$\{RUNNER_SHA256:-\$DEF_RUNNER_SHA256\}"' "$(IMG provision.sh)"
+  grep -q 'actions-runner-linux-${RUNNER_ARCH}-${RUNNER_VERSION}.tar.gz' "$(IMG provision.sh)"
   grep -q 'fetch ".*${tarball}" "$TMP/$tarball" "$RUNNER_SHA256"' "$(IMG provision.sh)"
   # fetch() verifies with sha256sum -c and dies on mismatch
   grep -q 'sha256sum -c -' "$(IMG provision.sh)"
@@ -34,8 +94,8 @@ setup() { slots_setup; }
 
 @test "provision: supabase CLI pinned to 2.107.0 with a sha256, in the tool cache with a .complete marker" {
   grep -Eq '^CLI_VERSION="\$\{CLI_VERSION:-2\.107\.0\}"' "$(IMG provision.sh)"
-  grep -Eq '^CLI_SHA256="\$\{CLI_SHA256:-[0-9a-f]{64}\}"' "$(IMG provision.sh)"
-  grep -q 'supabase_${CLI_VERSION}_linux_arm64.tar.gz" "$TMP/supabase.tgz" "$CLI_SHA256"' "$(IMG provision.sh)"
+  grep -Eq '^CLI_SHA256="\$\{CLI_SHA256:-\$DEF_CLI_SHA256\}"' "$(IMG provision.sh)"
+  grep -q 'supabase_${CLI_VERSION}_linux_${CLI_ARCH}.tar.gz" "$TMP/supabase.tgz" "$CLI_SHA256"' "$(IMG provision.sh)"
   grep -q 'touch "$TC/supabase/$CLI_VERSION/$TC_ARCH.complete"' "$(IMG provision.sh)"
 }
 
@@ -45,14 +105,17 @@ setup() { slots_setup; }
   grep -q 'touch "$TC/deno/$v/$TC_ARCH.complete"' "$f"
   grep -q 'Python/$ver/$TC_ARCH.complete' "$f"
   # pinned values (node: from SHASUMS256.txt.asc after a GPG check; deno: GitHub asset digests)
-  grep -Eq '^NODE_SPECS="\$\{NODE_SPECS:-20\.20\.2\|[0-9a-f]{64} 22\.23\.3\|[0-9a-f]{64} 24\.22\.0\|[0-9a-f]{64}\}"' "$f"
-  grep -Eq '^DENO_SPECS="\$\{DENO_SPECS:-2\.6\.8\|09a0a800be639986515540ddae2f2752625ed412f63d36c7152c2a72ee78c2d7 2\.9\.7\|[0-9a-f]{64}\}"' "$f"
+  grep -Eq '^NODE_SPECS="\$\{NODE_SPECS:-\$DEF_NODE_SPECS\}"' "$f"
+  grep -Eq '^DENO_SPECS="\$\{DENO_SPECS:-\$DEF_DENO_SPECS\}"' "$f"
+  grep -Eq '^PYTHON_SPECS="\$\{PYTHON_SPECS:-\$DEF_PYTHON_SPECS\}"' "$f"
+  grep -Eq '^    DEF_NODE_SPECS="20\.20\.2\|[0-9a-f]{64} 22\.23\.3\|[0-9a-f]{64} 24\.22\.0\|[0-9a-f]{64}"' "$f"
+  grep -Eq '^    DEF_DENO_SPECS="2\.6\.8\|[0-9a-f]{64} 2\.9\.7\|[0-9a-f]{64}"' "$f"
   grep -q 'fetch "https://nodejs.org/dist/v${v}/${tarball}" "$TMP/$tarball" "$sha"' "$f"
   grep -q 'fetch "https://github.com/denoland/deno/releases/download/v${v}/deno-${DENO_TARGET}.zip" "$TMP/deno-$v.zip" "$sha"' "$f"
   # CRITICAL: a checksum downloaded from the artifact's own origin is not verification
   refute grep -E 'SHASUMS256\.txt"|\.sha256sum"' "$f"
   refute grep -E 'curl .*(SHASUMS256|sha256sum)' "$f"
-  for py in 3.11 3.12 3.13; do grep -Eq "$py\.[0-9]+-[0-9]+\|[0-9a-f]{64}" "$f"; done
+  for py in 3.11 3.12 3.13; do [ "$(grep -Ec "$py\.[0-9]+-[0-9]+\|[0-9a-f]{64}" "$f")" -eq 2 ]; done
   grep -q 'ln -sf "$TC/node/$NODE_DEFAULT/$TC_ARCH/bin/$b" "/usr/local/bin/$b"' "$f"
 }
 
@@ -274,4 +337,48 @@ bb() { bash "$(BUILD)" "$@" 2> /dev/null; }
   # extracting only the shim fails with "Could not find the supabase-go binary".
   grep -E 'tar -xzf "\$TMP/supabase\.tgz" -C "\$dest" supabase supabase-go' "$(IMG provision.sh)"
   grep -q -- '-x "$dest/supabase-go"' "$(IMG provision.sh)"
+}
+
+# ── Proxmox guest pieces (ghr-runner-run, ghr-runner.service, pve-user-data.yaml) ─────────────────
+
+@test "ghr-runner-run: JIT read from the tmpfs file and deleted before the runner starts; reaches the runner only through a pipe" {
+  f="$(IMG ghr-runner-run)"
+  grep -q '^JIT_FILE=/run/ghr/jit' "$f"
+  [ "$(grep -n 'rm -f "\$JIT_FILE"' "$f" | head -1 | cut -d: -f1)" -lt "$(grep -n 'runuser -u runner' "$f" | head -1 | cut -d: -f1)" ]
+  grep -q "printf '%s\\\\n' \"\$J\" | runuser -u runner" "$f"
+  grep -q 'read -r J && exec ./run.sh --jitconfig "\$J"' "$f"
+  # never exported, never an argument, never traced
+  refute grep -E '^[[:space:]]*export J|set -x|--jitconfig [^"]' "$f"
+  grep -q 'AGENT_TOOLSDIRECTORY=/opt/hostedtoolcache RUNNER_TOOL_CACHE=/opt/hostedtoolcache' "$f"
+}
+
+@test "ghr-runner-run: the exit code is written atomically BEFORE the grace period, then the VM powers off" {
+  f="$(IMG ghr-runner-run)"
+  e=$(grep -n 'mv -f "\$EXIT_FILE.tmp" "\$EXIT_FILE"' "$f" | head -1 | cut -d: -f1)
+  s=$(grep -n '^sleep "\$GRACE"' "$f" | head -1 | cut -d: -f1)
+  p=$(grep -n 'systemctl poweroff' "$f" | head -1 | cut -d: -f1)
+  [ -n "$e" ] && [ "$e" -lt "$s" ] && [ "$s" -lt "$p" ]
+  grep -q '^EXIT_FILE=/var/lib/ghr/exit' "$f"
+  [ -x "$f" ]
+}
+
+@test "ghr-runner.service: oneshot, started explicitly (not enabled), guarded by the JIT file, no job timeout of its own" {
+  f="$(IMG ghr-runner.service)"
+  grep -q '^Type=oneshot' "$f"
+  grep -q '^ConditionPathExists=/run/ghr/jit' "$f"
+  grep -q '^ExecStart=/usr/local/libexec/ghr-runner-run' "$f"
+  grep -q '^TimeoutStartSec=infinity' "$f"
+  refute grep -q '^\[Install\]' "$f"
+}
+
+@test "pve-user-data.yaml: installs and starts the guest agent only (no users, no keys, no passwords)" {
+  f="$(IMG pve-user-data.yaml)"
+  head -1 "$f" | grep -qx '#cloud-config'
+  grep -q 'qemu-guest-agent' "$f"
+  refute grep -qiE '^(users|ssh_authorized_keys|chpasswd|password|ssh_pwauth: true)' "$f"
+  python3 - "$f" <<'PY'
+import sys
+t = open(sys.argv[1]).read()
+assert "ssh-rsa" not in t and "ssh-ed25519" not in t
+PY
 }
