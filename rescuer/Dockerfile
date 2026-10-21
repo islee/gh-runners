@@ -1,4 +1,5 @@
-# ghr-rescuer: re-routes runs stranded on self-hosted labels (see rescue.py). Stdlib python + openssl.
+# ghr-rescuer: re-routes runs stranded on self-hosted labels (see rescue.py); the same image also runs
+# the minutes ledger (usage.py, selected by the compose `entrypoint`). Stdlib python + openssl.
 # Base pinned by index digest (python:3.13-alpine, resolved 2026-10-16); bump deliberately.
 FROM python:3.13-alpine@sha256:2d9aefe2fef018a7eb2c13064c89c71929800fd2e5dccdbf52ea5da5bb8d929a
 
@@ -6,7 +7,7 @@ FROM python:3.13-alpine@sha256:2d9aefe2fef018a7eb2c13064c89c71929800fd2e5dccdbf5
 RUN apk add --no-cache openssl
 
 WORKDIR /app
-COPY rescue.py .
+COPY rescue.py usage.py ./
 
 # Unprivileged by default; compose may override `user:` so a host-owned 0400 key stays readable.
 USER 65534:65534

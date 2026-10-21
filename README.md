@@ -37,7 +37,7 @@ tied to one organization.
 gh-runners/
 ├── slots/        # macOS host: JIT slot loops, Lima pool, heartbeat, installer; Proxmox slot (+ tests/, bats)
 ├── images/       # runner images: light (container, hosted-parity tool cache) and supabase (Lima / Proxmox golden VM)
-├── rescuer/      # off-pool container: cancels + re-runs jobs stranded on pool labels (+ tests/, pytest)
+├── rescuer/      # off-pool container: cancels + re-runs jobs stranded on pool labels, plus the usage ledger (+ tests/, pytest)
 ├── requirements-dev.txt   # gate deps (pytest, ruff)
 ├── .pre-commit-config.yaml  .hadolint.yaml  .github/   # gate = CI (same hooks)
 └── README.md  LICENSE  .gitignore

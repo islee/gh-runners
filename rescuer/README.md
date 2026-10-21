@@ -20,10 +20,12 @@ least one minute, so it can't poll often.
 | File | Role |
 |---|---|
 | `rescue.py` | The loop: App JWT (openssl) → installation token → scan → cancel + re-run. Stdlib only |
+| `usage.py` | The minutes ledger: GET-only collector into SQLite, plus `--report`. Imports `rescue.py` |
 | `Dockerfile` | `python:3.13-alpine` (digest-pinned) + openssl; non-root; healthcheck on the last good pass |
-| `compose.example.yml` | Hardened single-container stack (read-only rootfs, no caps, 128 MB) |
+| `compose.example.yml` | Hardened stack: `rescuer` and `usage` services, same image (read-only rootfs, no caps, 128 MB each) |
 | `rescuer.example.env` | Config template; copy to `rescuer.env` (gitignored) |
 | `tests/test_rescue.py` | Offline tests with a fake GitHub client, plus a real-openssl JWT verify |
+| `tests/test_usage.py` | Offline ledger tests: minute rounding, idempotency, windowing, report math |
 
 ## Setup
 
@@ -59,6 +61,28 @@ Worst-case rescue latency is about `MAX_WAIT_MIN + INTERVAL_SEC`.
    the job, every re-run routes back to the pool. Past the cap the run is logged as `SKIP` and left
    for a human.
 
+## Usage ledger
+
+Self-hosted minutes are free, so GitHub's own usage reports show none for the pool. `usage.py`
+records every finished job (pool and hosted) and prices the pool's minutes at the hosted rate, as a
+proxy for money saved. It only issues GET calls, so the App needs nothing beyond the Actions read it
+already has, and it covers every repo the installation covers (`REPOS` is ignored).
+
+1. **Per-job ceil.** GitHub bills each job and each attempt separately, rounding up to a whole
+   minute. Jobs of 21 s, 80 s, 69 s and 3 s bill 1+2+2+1 = 6 min although the run took 89 s. The
+   ledger stores one row per job with that rounded figure, never a per-run total.
+2. **Run it.** The `usage` compose service loops every `USAGE_INTERVAL_SEC`. Set `USAGE_SINCE` for the
+   first run (backfill start); later passes resume from the last clean pass.
+3. **Read it.** `docker compose exec usage python3 /app/usage.py --report [YYYY-MM]` reads the DB
+   only. Per month: pool minutes (and per label), hosted minutes, job counts, `list_value`
+   (pool minutes at `RATE_PER_MIN`) and `free_saving` (what those minutes would have cost beyond the
+   `INCLUDED_MINUTES` free tier, after the hosted minutes already used it).
+4. **Lookback trade-off.** Each pass re-scans runs created in the last `USAGE_LOOKBACK_DAYS` before
+   the last clean pass. A re-run started later than that keeps its original creation date and is
+   missed. A wider window costs one list call per repo per day on every pass.
+5. **A proxy.** Pool job durations stand in for hosted durations; the hosted runner may be faster or
+   slower, and the rate is the Linux 2-core list price regardless of the real runner size.
+
 ## Gotchas
 
 1. A run can be re-run only once it is `completed`, so the rescuer waits up to 2 minutes after the
@@ -76,3 +100,11 @@ Worst-case rescue latency is about `MAX_WAIT_MIN + INTERVAL_SEC`.
    permission turns the container unhealthy. It can't see coverage, though: if the App is
    uninstalled from a repo, that repo silently drops out of the scan, because the installation
    lists what it covers.
+6. The image sets `HEARTBEAT_FILE` for the rescuer, so the `usage` service would inherit it; it sets
+   its own in `environment:`. `INTERVAL_SEC` (rescuer) and `USAGE_INTERVAL_SEC` (ledger) are
+   separate, so one `rescuer.env` serves both.
+7. The first pass backfills from `USAGE_SINCE` at roughly one call per run. A large backlog can hit
+   the installation's hourly API budget; the pass is then logged as `DEGRADED`, nothing is lost, and
+   the next pass resumes (ingested runs are skipped).
+8. `./usage-data` must be writable by the `user:` uid; the rootfs is read-only, so a wrong owner
+   fails at start with a SQLite "unable to open database file" error.
