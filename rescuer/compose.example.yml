@@ -18,3 +18,33 @@ services:
     logging:
       driver: json-file
       options: {max-size: "5m", max-file: "3"}
+
+  # Minutes ledger (usage.py): same image, same App key, its own loop and SQLite file.
+  usage:
+    build: .
+    image: ghr-rescuer:local
+    container_name: ghr-usage
+    restart: unless-stopped
+    entrypoint: ["python3", "/app/usage.py"]
+    healthcheck:
+      test: ["CMD", "python3", "/app/usage.py", "--healthcheck"]
+      interval: 60s
+      timeout: 5s
+      start_period: 300s
+    user: "1000:1000"            # owner of rescuer-app.pem on the host
+    env_file: rescuer.env
+    environment:
+      # The image sets HEARTBEAT_FILE for the rescuer; override it so this service has its own.
+      HEARTBEAT_FILE: /tmp/usage.last-ok
+    volumes:
+      - ./rescuer-app.pem:/run/secrets/rescuer-app.pem:ro
+      # Writable ledger dir; create it owned by the `user:` uid (the rootfs is read-only).
+      - ./usage-data:/data
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 128m
+    logging:
+      driver: json-file
+      options: {max-size: "5m", max-file: "3"}
