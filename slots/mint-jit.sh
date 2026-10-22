@@ -8,12 +8,12 @@
 # pipes it onward on stdin; it must never reach argv or the environment).
 #
 # Refuses (exit 2, nothing sent to GitHub):
-#   - names not matching ^ghr-(light|supabase)-[0-9]+$ (anchored, no trailing newline)
+#   - names not matching ^ghr-(light|supabase|ios)-[0-9]+$ (anchored, no trailing newline)
 #   - hosted-runner labels (ubuntu-*, macos-*, windows-*) -- CRITICAL: a runner carrying one of
 #     these would silently absorb jobs meant for GitHub-hosted runners
 #   - `self-hosted` as the only label
 #   - any label not in ALLOWED_LABELS; an EMPTY ALLOWED_LABELS refuses everything (fail closed:
-#     this controller has no reason to run open)
+#     this controller has no reason to run open). The ios class label (ghr-ios) must be listed too.
 #
 # Dependencies: lib/gh-app.sh, curl, openssl, python3.
 

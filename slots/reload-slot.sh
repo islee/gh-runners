@@ -39,7 +39,7 @@ log() { echo "[reload-slot] $*" >&2; }
 main() {
   [ "$#" -eq 2 ] || { echo "usage: reload-slot.sh <label> <plist>" >&2; exit 2; }
   local label=$1 plist=$2 waited=0 helper_label helper_plist
-  [[ "$label" =~ ^dev\.ghr\.slot\.(light|supabase)-[1-9]$ ]] || { echo "invalid label" >&2; exit 2; }
+  [[ "$label" =~ ^dev\.ghr\.slot\.(light|supabase|ios)-[1-9]$ ]] || { echo "invalid label" >&2; exit 2; }
   [ "$plist" = "$DAEMON_DIR/$label.plist" ] || { echo "plist must be $DAEMON_DIR/$label.plist" >&2; exit 2; }
   [ -f "$plist" ] || { echo "no such plist: $plist" >&2; exit 2; }
   helper_label="dev.ghr.reload.${label#dev.ghr.slot.}"

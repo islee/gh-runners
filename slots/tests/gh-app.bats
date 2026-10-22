@@ -80,9 +80,14 @@ setup() {
   [ "$(printf '%s\n' "$out" | sed -n 2p | cut -f2)" = "evil?name?x" ]
 }
 
-@test "runner name regex: anchored, no trailing newline, only light|supabase" {
+@test "runner name regex: anchored, no trailing newline, only light|supabase|ios" {
   ghr_valid_runner_name ghr-light-1
   ghr_valid_runner_name ghr-supabase-12
+  ghr_valid_runner_name ghr-ios-1
+  refute ghr_valid_runner_name "ghr-ios-"
+  refute ghr_valid_runner_name "ghr-iosx-1"
+  refute ghr_valid_runner_name $'ghr-ios-1\n'
+  refute ghr_valid_runner_name "ghr-macos-1"
   refute ghr_valid_runner_name ghr-android-1
   refute ghr_valid_runner_name "ghr-light-1x"
   refute ghr_valid_runner_name "xghr-light-1"
