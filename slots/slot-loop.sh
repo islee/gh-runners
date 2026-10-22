@@ -17,6 +17,17 @@
 # abandoned instead of waiting up to 6 h for a job; if it IS busy the current job finishes
 # first. A SECOND signal kills the launch immediately.
 #
+# ios class (Tart macOS VM; IOS_SLOTS 0|1): DORMANT by default -- no runner registered, no VM. The
+# heartbeat's demand probe writes $GHR_DEMAND_DIR/ios while a job labelled ghr-ios is queued. Then
+# this loop (1) takes a capacity LEASE ($GHR_CAP_DIR/ios.lease, refreshed every TICK) and shows
+# `waiting-capacity`, (2) waits until every supabase slot above IOS_SUPA_KEEP reports `yielded`
+# (the 8 GiB macOS VM does not fit next to more supabase VMs), (3) mints a JIT runner and launches
+# as usual. Supabase loops above IOS_SUPA_KEEP watch the lease: before minting they sit in
+# `yielded`, and a runner that is registered but has no job yet is released and its launch (VM)
+# abandoned. `yielded` is written only after that slot's launch has exited (VM destroyed).
+# An idle ios runner is also released when the demand disappears, so a vanished job never pins the
+# lease (and the supabase slots) for hours.
+#
 # Linux / Proxmox host: LAUNCH_USER=root and LAUNCH_BIN=/usr/local/libexec/ghr/launch-pve (set in the
 # systemd unit by install-pve.sh); the slot range then comes from PVE_SLOTS instead of SUPABASE_SLOTS.
 #
@@ -35,6 +46,18 @@ LAUNCH_USER="${LAUNCH_USER:-ghr}"
 TICK="${TICK:-15}"
 BACKOFF_MIN=30
 BACKOFF_MAX=300
+# ios capacity handshake (see header). Directories are created by install.sh; overridable for tests.
+GHR_CAP_DIR="${GHR_CAP_DIR:-/var/db/ghr/capacity}"
+GHR_DEMAND_DIR="${GHR_DEMAND_DIR:-/var/db/ghr/demand}"
+# The demand file is rewritten every heartbeat (60 s): 150 s tolerates two missed beats.
+DEMAND_FRESH_SECS="${DEMAND_FRESH_SECS:-150}"
+# The lease and a `yielded` state file are rewritten every TICK (15 s).
+LEASE_FRESH_SECS="${LEASE_FRESH_SECS:-60}"
+IOS_YIELD_WAIT_SECS="${IOS_YIELD_WAIT_SECS:-3600}"
+# Tolerated clock skew for the epochs read back from those files.
+FUTURE_SECS="${FUTURE_SECS:-5}"
+# After "busy" answers to a release attempt that is not a shutdown, wait this long before asking again.
+BUSY_REPROBE_SECS="${BUSY_REPROBE_SECS:-120}"
 
 TERMINATING=0
 LAUNCH_PID=""
@@ -84,7 +107,7 @@ do_reconcile() { "$(sibling reconcile)" "$1"; }
 # NOTE: labels word-split on purpose (config holds `a,b` or `a b`); mint-jit validates each.
 do_mint() {
   local labels
-  case "$CLASS" in light) labels=$LIGHT_LABELS ;; supabase) labels=$SUPABASE_LABELS ;; esac
+  case "$CLASS" in light) labels=$LIGHT_LABELS ;; supabase) labels=$SUPABASE_LABELS ;; ios) labels=$IOS_LABELS ;; esac
   # shellcheck disable=SC2086
   "$(sibling mint-jit)" "$1" ${labels//,/ }
 }
@@ -92,6 +115,131 @@ do_mint() {
 do_release() { "$(sibling reconcile)" --release "$1"; }
 # do_launch — JIT on stdin, never argv/env. Reads the JIT from the global JIT.
 do_launch() { printf '%s\n' "$JIT" | sudo -n -u "$LAUNCH_USER" "$LAUNCH_BIN" "$CLASS" "$N"; }
+
+# ── ios capacity handshake ────────────────────────────────────────────────────
+
+# nap — sleep one TICK; a trapped signal wakes it early.
+nap() {
+  sleep "$TICK" &
+  wait $! 2> /dev/null
+}
+
+# epoch_fresh FILE MAX_AGE — 0 iff FILE's first field is an epoch no older than MAX_AGE s and not
+# more than FUTURE_SECS in the future. WHY the epoch inside and not the mtime: the writer controls
+# it, and a clock jump or a stale copy must not look fresh.
+epoch_fresh() {
+  local ts="" now
+  read -r ts _ < "$1" 2> /dev/null || true
+  [[ "$ts" =~ ^[0-9]+$ ]] || return 1
+  now=$(date -u +%s)
+  [ "$((now - ts))" -le "$2" ] && [ "$((ts - now))" -le "$FUTURE_SECS" ]
+}
+
+# demand_fresh — 0 iff the heartbeat saw an ios-labelled job queued recently (`<epoch> <count>`).
+demand_fresh() {
+  local ts="" cnt=""
+  epoch_fresh "$GHR_DEMAND_DIR/ios" "$DEMAND_FRESH_SECS" || return 1
+  read -r ts cnt < "$GHR_DEMAND_DIR/ios" 2> /dev/null || true
+  [[ "$cnt" =~ ^[0-9]+$ ]] && [ "$cnt" -gt 0 ]
+}
+
+lease_write() {
+  local f="$GHR_CAP_DIR/ios.lease"
+  ( umask 077
+    mkdir -p "$GHR_CAP_DIR" && date -u +%s > "$f.tmp.$$" && mv -f "$f.tmp.$$" "$f" ) 2> /dev/null \
+    || { rm -f "$f.tmp.$$" 2> /dev/null; ghr_log "WARN cannot write lease $f"; }
+}
+lease_remove() { rm -f "$GHR_CAP_DIR/ios.lease" 2> /dev/null; }
+lease_fresh() { epoch_fresh "$GHR_CAP_DIR/ios.lease" "$LEASE_FRESH_SECS"; }
+
+# supa_must_yield — 0 iff this is a supabase slot above IOS_SUPA_KEEP and a fresh ios lease exists.
+# The iOS class being disabled (IOS_SLOTS=0, e.g. on the Proxmox host) switches the whole thing off.
+supa_must_yield() {
+  [ "$CLASS" = supabase ] && [ "${IOS_SLOTS:-0}" -ge 1 ] && [ "$N" -gt "${IOS_SUPA_KEEP:-1}" ] && lease_fresh
+}
+
+# supa_all_yielded — 0 iff every local supabase slot above IOS_SUPA_KEEP shows a fresh `yielded`
+# state file (a slot that is not configured does not exist, so it counts as yielded).
+supa_all_yielded() {
+  local n f ts st now
+  now=$(date -u +%s)
+  n=$(( ${IOS_SUPA_KEEP:-1} + 1 ))
+  while [ "$n" -le "${SUPABASE_SLOTS:-0}" ]; do
+    f="$GHR_STATE_DIR/supabase-$n.json"
+    [ -r "$f" ] || return 1
+    ts=$(sed -n 's/.*"ts":\([0-9][0-9]*\).*/\1/p' "$f" | head -1)
+    st=$(sed -n 's/.*"state":"\([a-z-]*\)".*/\1/p' "$f" | head -1)
+    [ "$st" = yielded ] && [[ "$ts" =~ ^[0-9]+$ ]] || return 1
+    [ "$((now - ts))" -le "$LEASE_FRESH_SECS" ] && [ "$((ts - now))" -le "$FUTURE_SECS" ] || return 1
+    n=$((n + 1))
+  done
+  return 0
+}
+
+# cycle_gate — runs at the top of every cycle, before reconcile/mint. Returns 0 = proceed to mint,
+# 1 = nothing to do this cycle (clean), 2 = failed (back off). Light slots always proceed.
+cycle_gate() {
+  case "$CLASS" in
+    ios) ios_gate ;;
+    supabase) supa_gate ;;
+    *) return 0 ;;
+  esac
+}
+
+# supa_gate — sit in `yielded` (no mint, no VM) for as long as the ios lease is fresh.
+supa_gate() {
+  supa_must_yield || return 0
+  ghr_log "yielding to the ios slot"
+  while [ "$TERMINATING" -eq 0 ] && supa_must_yield; do
+    write_state yielded
+    nap
+  done
+  [ "$TERMINATING" -eq 0 ] || return 1
+  ghr_log "ios lease gone: resuming"
+  return 0
+}
+
+# ios_gate — dormant until demand, then take the lease and wait for the supabase slots to yield.
+ios_gate() {
+  local t0
+  while [ "$TERMINATING" -eq 0 ] && ! demand_fresh; do
+    lease_remove
+    write_state dormant
+    nap
+  done
+  [ "$TERMINATING" -eq 0 ] || return 1
+  t0=$(date -u +%s)
+  ghr_log "ios demand: taking the capacity lease"
+  while [ "$TERMINATING" -eq 0 ]; do
+    lease_write
+    supa_all_yielded && return 0
+    if ! demand_fresh; then
+      ghr_log "ios demand gone while waiting for capacity"
+      lease_remove
+      return 1
+    fi
+    if [ "$(( $(date -u +%s) - t0 ))" -gt "$IOS_YIELD_WAIT_SECS" ]; then
+      # Drop the lease so the supabase slots resume; the failed cycle backs off before retrying.
+      ghr_log "ERROR supabase slots did not yield within ${IOS_YIELD_WAIT_SECS}s"
+      lease_remove
+      return 2
+    fi
+    write_state waiting-capacity
+    nap
+  done
+  return 1
+}
+
+# abort_reason — print why the minted-but-possibly-idle runner should be released now ("" = no
+# reason). Shutdown, an ios lease taking this supabase slot's memory, or an ios runner whose demand
+# vanished (job cancelled or taken elsewhere).
+abort_reason() {
+  if [ "$TERMINATING" -eq 1 ]; then echo "shutting down"; return; fi
+  case "$CLASS" in
+    supabase) ! supa_must_yield || echo "ios lease" ;;
+    ios) demand_fresh || echo "no ios demand" ;;
+  esac
+}
 
 # backoff_wait SECONDS — nap in <= TICK chunks, refreshing the state file each chunk so the
 # heartbeat does not mistake a backing-off (but alive) loop for a wedged one. Wakes early on a
@@ -110,7 +258,12 @@ backoff_wait() {
 
 # run_cycle — one full slot cycle. Returns 0 on a clean (or shutdown) cycle, 1 on a failed step.
 run_cycle() {
-  local name="ghr-$CLASS-$N" rc aborted=0
+  local name="ghr-$CLASS-$N" rc aborted=0 gate=0 reason next_probe=0
+  [ "$TERMINATING" -eq 0 ] || return 0
+  # IMPORTANT: the gate comes first -- an ios lease must stop a supabase slot BEFORE it mints, and
+  # the ios slot stays dormant (no runner, no VM) until there is demand.
+  cycle_gate || gate=$?
+  [ "$gate" -eq 0 ] || { [ "$gate" -eq 1 ] && return 0; return 1; }
   [ "$TERMINATING" -eq 0 ] || return 0
   write_state idle-prep
   do_reconcile "$name" || { ghr_log "reconcile failed for $name"; return 1; }
@@ -129,22 +282,28 @@ run_cycle() {
   LAUNCH_PID=$!
   JIT=""
   while kill -0 "$LAUNCH_PID" 2> /dev/null; do
-    if [ "$TERMINATING" -eq 1 ] && [ "$aborted" -eq 0 ]; then
+    [ "$CLASS" != ios ] || lease_write
+    reason=""
+    if [ "$aborted" -eq 0 ] && [ "$(date -u +%s)" -ge "$next_probe" ]; then reason=$(abort_reason); fi
+    if [ -n "$reason" ]; then
       rc=0
       do_release "$name" || rc=$?
       if [ "$rc" -eq 0 ]; then
         # NOTE: the sudo'd launch is root-owned and cannot be signalled from here; deleting the
-        # runner makes the in-container listener exit, which ends docker run and launch.
+        # runner makes the in-container listener exit (or, while an ios/supabase VM is still
+        # booting, makes the runner fail to register once it starts), which ends launch.
         aborted=1
-        ghr_log "released idle runner $name; abandoning launch"
+        ghr_log "released idle runner $name ($reason); abandoning launch"
         kill -TERM "$LAUNCH_PID" 2> /dev/null
         break
       fi
       ghr_log "runner $name busy (rc=$rc): letting the job finish"
+      # A shutdown re-asks every tick (as before); other reasons back off so a long job does not
+      # cost an API listing per tick.
+      if [ "$TERMINATING" -eq 1 ]; then next_probe=0; else next_probe=$(( $(date -u +%s) + BUSY_REPROBE_SECS )); fi
     fi
     write_state "$STATE_NAME"
-    sleep "$TICK" &
-    wait $! 2> /dev/null
+    nap
   done
   if [ "$aborted" -eq 1 ]; then
     wait "$LAUNCH_PID" 2> /dev/null
@@ -172,11 +331,16 @@ main() {
   [ "$#" -eq 2 ] || { echo "usage: slot-loop.sh <class> <n>" >&2; exit 2; }
   CLASS=$1
   N=$2
-  case "$CLASS" in light | supabase) ;; *) echo "slot-loop: unsupported class: $CLASS" >&2; exit 2 ;; esac
+  case "$CLASS" in light | supabase | ios) ;; *) echo "slot-loop: unsupported class: $CLASS" >&2; exit 2 ;; esac
   [[ "$N" =~ ^[1-9][0-9]*$ ]] || { echo "slot-loop: invalid slot number" >&2; exit 2; }
   ghr_load_config || exit 1
   local max
-  case "$CLASS" in light) max=$LIGHT_SLOTS ;; supabase) max=$SUPABASE_SLOTS ;; esac
+  case "$CLASS" in
+    light) max=$LIGHT_SLOTS ;;
+    supabase) max=$SUPABASE_SLOTS ;;
+    # hard max 1: the macOS licence allows 2 VMs per host, we spend memory on one
+    ios) max=$IOS_SLOTS; [ "$max" -le 1 ] || max=1 ;;
+  esac
   # NOTE: on the Proxmox host SUPABASE_SLOTS is 0 and the supabase slots are PVE_SLOTS (a list).
   if ! [ "$N" -le "$max" ] && ! { [ "$CLASS" = supabase ] && pve_slot_listed "$N"; }; then
     echo "slot-loop: slot beyond configured ${CLASS} slots" >&2
@@ -184,6 +348,8 @@ main() {
   fi
   ghr_valid_runner_name "ghr-$CLASS-$N" || exit 2
   trap on_signal TERM INT
+  # The lease must never outlive this loop: stale or not, a held lease starves the supabase slots.
+  [ "$CLASS" != ios ] || trap lease_remove EXIT
   local backoff=0
   while [ "$TERMINATING" -eq 0 ]; do
     if run_cycle; then

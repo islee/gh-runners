@@ -251,3 +251,324 @@ do_launch() { exec sleep 20; }' 1
   [ "$rc" -ne 2 ]
   refute grep -q "beyond configured" "$W/loop.out"
 }
+
+# ── ios class: dormant slot, capacity lease, supabase yield ──────────────────────────────────────────
+
+# ios_env — config for the capacity tests: 3 supabase slots, one allowed to stay up beside the ios VM.
+ios_env() {
+  printf 'IOS_SLOTS=1\nSUPABASE_SLOTS=3\nIOS_SUPA_KEEP=1\nALLOWED_LABELS="ghr-light,ghr-supabase,ghr-ios"\n' >> "$W/slots.env"
+  export GHR_CAP_DIR="$W/cap" GHR_DEMAND_DIR="$W/demand"
+  mkdir -p "$GHR_CAP_DIR" "$GHR_DEMAND_DIR"
+  # setup() loaded the config before these lines existed
+  ghr_load_config
+}
+teardown() { [ -z "${DRV_PID:-}" ] || kill -TERM "$DRV_PID" 2> /dev/null || true; }
+demand_on() { printf '%s 1\n' "$(date -u +%s)" > "$GHR_DEMAND_DIR/ios"; }
+demand_off() { rm -f "$GHR_DEMAND_DIR/ios"; }
+# sup_state N STATE — a fresh supabase slot file.
+sup_state() {
+  local now
+  now=$(date -u +%s)
+  printf '{"slot":"supabase-%s","class":"supabase","n":%s,"state":"%s","ts":%s,"since":%s,"last_exit":0}\n' "$1" "$1" "$2" "$now" "$now" > "$W/state/supabase-$1.json"
+}
+state_is() { [ "$(state_of "$1")" = "$2" ]; }
+state_of() { sed -n 's/.*"state":"\([a-z-]*\)".*/\1/p' "$W/state/$1.json"; }
+# wait_for DESC CMD... — poll up to ~15 s.
+wait_for() { local i; for i in $(seq 1 75); do "$@" && return 0; sleep 0.2; done; return 1; }
+# driver CLASS N BODY — background `main CLASS N` with stubbed steps from BODY; sets DRV_PID.
+driver() {
+  cat > "$W/drive2.sh" <<DRV
+source "$SLOTS_DIR/slot-loop.sh"
+do_reconcile() { return 0; }
+do_mint() { echo "\$1" >> "$W/minted"; echo BLOB; }
+do_release() { echo "\$1" >> "$W/released"; return 0; }
+do_launch() { echo launched >> "$W/launched"; sleep 1; }
+$3
+main $1 $2
+DRV
+  bash "$W/drive2.sh" 2> "$W/loop.err" > /dev/null &
+  DRV_PID=$!
+}
+stop_driver() { kill -TERM "$DRV_PID" 2> /dev/null; wait "$DRV_PID" 2> /dev/null || true; }
+
+@test "ios: arg validation follows IOS_SLOTS (default 0 = disabled), hard max 1" {
+  run bash "$SLOTS_DIR/slot-loop.sh" ios 1
+  [ "$status" -eq 2 ]
+  printf 'IOS_SLOTS=2\n' >> "$W/slots.env"
+  run bash "$SLOTS_DIR/slot-loop.sh" ios 2
+  [ "$status" -eq 2 ]
+  run bash "$SLOTS_DIR/slot-loop.sh" ios 0
+  [ "$status" -eq 2 ]
+}
+
+@test "ios: mint uses IOS_LABELS" {
+  source "$SLOTS_DIR/slot-loop.sh"
+  printf '#!/bin/bash\nprintf "%%s|" "$@"\n' > "$W/fakemint"; chmod +x "$W/fakemint"
+  sibling() { echo "$W/fakemint"; }
+  CLASS=ios
+  IOS_LABELS="ghr-ios"
+  [ "$(do_mint ghr-ios-1)" = "ghr-ios-1|ghr-ios|" ]
+}
+
+@test "demand_fresh: needs a fresh '<epoch> <count>' with count > 0 (stale, future, zero, garbage, missing -> no)" {
+  ios_env
+  refute demand_fresh
+  demand_on
+  demand_fresh
+  printf '%s 0\n' "$(date -u +%s)" > "$GHR_DEMAND_DIR/ios"
+  refute demand_fresh
+  printf '%s 2\n' "$(( $(date -u +%s) - DEMAND_FRESH_SECS - 1 ))" > "$GHR_DEMAND_DIR/ios"
+  refute demand_fresh
+  printf '%s 2\n' "$(( $(date -u +%s) + 3600 ))" > "$GHR_DEMAND_DIR/ios"
+  refute demand_fresh
+  echo garbage > "$GHR_DEMAND_DIR/ios"
+  refute demand_fresh
+}
+
+@test "ios: dormant without demand -- no lease, no mint, no launch; the state file keeps refreshing" {
+  ios_env
+  driver ios 1 ''
+  wait_for state_is ios-1 dormant
+  t0=$(sed -n 's/.*"ts":\([0-9]*\).*/\1/p' "$W/state/ios-1.json")
+  sleep 2.2
+  t1=$(sed -n 's/.*"ts":\([0-9]*\).*/\1/p' "$W/state/ios-1.json")
+  stop_driver
+  [ "$t1" -gt "$t0" ]
+  [ ! -e "$W/minted" ] && [ ! -e "$W/launched" ] && [ ! -e "$GHR_CAP_DIR/ios.lease" ]
+}
+
+@test "ios: a stale lease is removed while dormant" {
+  ios_env
+  echo 1 > "$GHR_CAP_DIR/ios.lease"
+  driver ios 1 ''
+  wait_for test ! -e "$GHR_CAP_DIR/ios.lease"
+  stop_driver
+}
+
+@test "ios: demand -> lease + waiting-capacity, and NO mint until every supabase slot above KEEP is yielded" {
+  ios_env
+  demand_on
+  sup_state 1 registered; sup_state 2 registered; sup_state 3 yielded
+  driver ios 1 ''
+  wait_for state_is ios-1 waiting-capacity
+  [ -s "$GHR_CAP_DIR/ios.lease" ]
+  sleep 1.5
+  [ ! -e "$W/minted" ]
+  # lease is refreshed, not just written once
+  l0=$(cat "$GHR_CAP_DIR/ios.lease"); sleep 2.2; l1=$(cat "$GHR_CAP_DIR/ios.lease")
+  [ "$l1" -gt "$l0" ]
+  sup_state 2 yielded
+  demand_on
+  wait_for test -e "$W/minted"
+  stop_driver
+  [ "$(cat "$W/minted")" = "ghr-ios-1" ]
+  [ -e "$W/launched" ]
+}
+
+@test "ios: only slots ABOVE IOS_SUPA_KEEP must yield (supabase-1 may keep running), unconfigured ones do not exist" {
+  ios_env
+  demand_on
+  sup_state 1 registered; sup_state 2 yielded; sup_state 3 yielded
+  supa_all_yielded
+  sup_state 3 registered
+  refute supa_all_yielded
+  # a yielded file that has stopped refreshing is not proof of anything
+  printf '{"slot":"supabase-3","class":"supabase","n":3,"state":"yielded","ts":%s,"since":1,"last_exit":0}\n' "$(( $(date -u +%s) - LEASE_FRESH_SECS - 5 ))" > "$W/state/supabase-3.json"
+  refute supa_all_yielded
+  sup_state 3 yielded
+  rm "$W/state/supabase-2.json"
+  refute supa_all_yielded
+  SUPABASE_SLOTS=1
+  supa_all_yielded
+}
+
+@test "ios: demand vanishing while waiting drops the lease and returns to dormant" {
+  ios_env
+  demand_on
+  sup_state 2 registered; sup_state 3 registered
+  driver ios 1 ''
+  wait_for state_is ios-1 waiting-capacity
+  demand_off
+  wait_for state_is ios-1 dormant
+  stop_driver
+  [ ! -e "$GHR_CAP_DIR/ios.lease" ] && [ ! -e "$W/minted" ]
+}
+
+@test "ios: the capacity wait is bounded -- lease dropped (supabase resumes), failed cycle, backoff" {
+  ios_env
+  demand_on
+  sup_state 2 registered; sup_state 3 registered
+  IOS_YIELD_WAIT_SECS=2 TICK=1 CLASS=ios N=1
+  # keep the demand fresh for the duration of the wait
+  ( for _ in $(seq 1 12); do demand_on; sleep 0.5; done ) &
+  bg=$!
+  rc=0
+  run_cycle || rc=$?
+  wait "$bg" 2> /dev/null || true
+  [ "$rc" -eq 1 ]
+  [ ! -e "$GHR_CAP_DIR/ios.lease" ]
+  [ ! -e "$W/minted" ]
+}
+
+@test "ios: after the job the lease is KEPT while demand is still fresh, dropped (dormant) when it is not" {
+  ios_env
+  demand_on
+  sup_state 2 yielded; sup_state 3 yielded
+  driver ios 1 'do_launch() { echo launched >> "'"$W"'/launched"; [ -e "'"$GHR_CAP_DIR"'/ios.lease" ] && echo lease-held >> "'"$W"'/during"; sleep 1; }'
+  wait_for test -e "$W/launched"
+  # (demand file keeps being fresh: a second job is queued) -> second cycle, lease continuously held
+  demand_on
+  launched_twice() { [ "$(grep -c launched "$W/launched" 2> /dev/null || echo 0)" -ge 2 ]; }
+  wait_for launched_twice
+  [ -s "$GHR_CAP_DIR/ios.lease" ]
+  demand_off
+  wait_for state_is ios-1 dormant
+  stop_driver
+  [ ! -e "$GHR_CAP_DIR/ios.lease" ]
+  [ "$(sort -u "$W/during")" = lease-held ]
+}
+
+@test "ios: the lease is refreshed for as long as the job runs" {
+  ios_env
+  demand_on
+  sup_state 2 yielded; sup_state 3 yielded
+  driver ios 1 'do_launch() { echo launched >> "'"$W"'/launched"; sleep 30; }'
+  wait_for test -e "$W/launched"
+  l0=$(cat "$GHR_CAP_DIR/ios.lease"); sleep 2.5; l1=$(cat "$GHR_CAP_DIR/ios.lease")
+  stop_driver
+  [ "$l1" -gt "$l0" ]
+}
+
+@test "ios: SIGTERM while waiting for capacity removes the lease and exits cleanly" {
+  ios_env
+  demand_on
+  sup_state 2 registered; sup_state 3 registered
+  driver ios 1 ''
+  wait_for state_is ios-1 waiting-capacity
+  [ -s "$GHR_CAP_DIR/ios.lease" ]
+  kill -TERM "$DRV_PID"
+  wait "$DRV_PID"
+  [ ! -e "$GHR_CAP_DIR/ios.lease" ]
+  grep -q 'exiting cleanly' "$W/loop.err"
+  [ ! -e "$W/minted" ]
+}
+
+@test "ios: SIGTERM mid-job (busy) lets the job finish, then removes the lease" {
+  ios_env
+  demand_on
+  sup_state 2 yielded; sup_state 3 yielded
+  driver ios 1 'do_release() { return 10; }
+do_launch() { echo launched >> "'"$W"'/launched"; sleep 3; echo done > "'"$W"'/job.done"; }'
+  wait_for test -e "$W/launched"
+  kill -TERM "$DRV_PID"
+  wait "$DRV_PID"
+  [ -f "$W/job.done" ]
+  [ ! -e "$GHR_CAP_DIR/ios.lease" ]
+}
+
+@test "ios: an idle runner whose demand vanished is released and its launch abandoned (lease dropped)" {
+  ios_env
+  demand_on
+  sup_state 2 yielded; sup_state 3 yielded
+  driver ios 1 'do_launch() { echo launched >> "'"$W"'/launched"; exec sleep 20; }'
+  wait_for test -e "$W/launched"
+  demand_off
+  wait_for test -e "$W/released"
+  [ "$(cat "$W/released")" = "ghr-ios-1" ]
+  wait_for state_is ios-1 dormant
+  stop_driver
+  grep -q 'no ios demand' "$W/loop.err"
+  [ ! -e "$GHR_CAP_DIR/ios.lease" ]
+}
+
+@test "ios: a BUSY ios runner is not released when the demand file is gone (the queued job is running now)" {
+  ios_env
+  demand_on
+  sup_state 2 yielded; sup_state 3 yielded
+  driver ios 1 'do_release() { echo "$1" >> "'"$W"'/released"; return 10; }
+do_launch() { echo launched >> "'"$W"'/launched"; sleep 4; echo done > "'"$W"'/job.done"; }'
+  wait_for test -e "$W/launched"
+  demand_off
+  wait_for test -f "$W/job.done"
+  stop_driver
+  # asked once, "busy" -> not asked again for BUSY_REPROBE_SECS
+  [ "$(wc -l < "$W/released")" -eq 1 ]
+}
+
+# supabase side ------------------------------------------------------------------------------------
+
+lease_on() { date -u +%s > "$GHR_CAP_DIR/ios.lease"; }
+
+@test "supabase above KEEP: with a fresh lease it sits in 'yielded' and mints NOTHING; resumes when the lease goes" {
+  ios_env
+  lease_on
+  driver supabase 2 ''
+  wait_for state_is supabase-2 yielded
+  # keep the lease fresh for a while
+  for _ in 1 2 3; do lease_on; sleep 0.7; done
+  [ ! -e "$W/minted" ] && [ ! -e "$W/launched" ]
+  rm -f "$GHR_CAP_DIR/ios.lease"
+  wait_for test -e "$W/minted"
+  stop_driver
+  [ "$(head -1 "$W/minted")" = "ghr-supabase-2" ]
+}
+
+@test "supabase yields BEFORE mint: the gate runs ahead of reconcile and mint (mutation target)" {
+  ios_env
+  lease_on
+  driver supabase 3 'do_reconcile() { echo reconcile >> "'"$W"'/order"; return 0; }'
+  wait_for state_is supabase-3 yielded
+  stop_driver
+  [ ! -e "$W/order" ] && [ ! -e "$W/minted" ]
+}
+
+@test "supabase at or below KEEP and light slots ignore the lease" {
+  ios_env
+  lease_on
+  driver supabase 1 ''
+  wait_for test -e "$W/minted"
+  stop_driver
+  [ "$(head -1 "$W/minted")" = "ghr-supabase-1" ]
+  [ "$(state_of supabase-1)" != yielded ]
+  rm -f "$W/minted" "$W/launched"
+  driver light 1 ''
+  wait_for test -e "$W/minted"
+  stop_driver
+  [ "$(head -1 "$W/minted")" = "ghr-light-1" ]
+}
+
+@test "supabase: a stale lease, or IOS_SLOTS=0 (e.g. the Proxmox host), never makes a slot yield" {
+  ios_env
+  echo 1 > "$GHR_CAP_DIR/ios.lease"
+  CLASS=supabase N=2
+  refute supa_must_yield
+  lease_on
+  supa_must_yield
+  IOS_SLOTS=0
+  refute supa_must_yield
+}
+
+@test "supabase registered (job not started): a new lease releases the runner, abandons the launch, and 'yielded' appears only AFTER the launch exited" {
+  ios_env
+  driver supabase 2 'do_launch() { echo launched >> "'"$W"'/launched"; trap "sleep 1; echo exited > \"'"$W"'/launch.exit\"; exit 143" TERM; sleep 30 & wait; }'
+  wait_for test -e "$W/launched"
+  lease_on
+  wait_for state_is supabase-2 yielded
+  # the moment 'yielded' is visible the VM-owning launch must already be gone
+  [ -e "$W/launch.exit" ]
+  [ "$(cat "$W/released")" = "ghr-supabase-2" ]
+  stop_driver
+  grep -q 'released idle runner ghr-supabase-2 (ios lease)' "$W/loop.err"
+}
+
+@test "supabase busy when the lease appears: the job finishes untouched, THEN the slot yields" {
+  ios_env
+  driver supabase 2 'do_release() { echo "$1" >> "'"$W"'/released"; return 10; }
+do_launch() { echo launched >> "'"$W"'/launched"; sleep 4; echo done > "'"$W"'/job.done"; }'
+  wait_for test -e "$W/launched"
+  lease_on
+  wait_for state_is supabase-2 yielded
+  [ -f "$W/job.done" ]
+  stop_driver
+  [ "$(grep -c launched "$W/launched")" -eq 1 ]
+}
