@@ -136,6 +136,9 @@ nap() {
 # it, and a clock jump or a stale copy must not look fresh.
 epoch_fresh() {
   local ts="" now
+  # WHY the -r test: in `read < "$1" 2> /dev/null` the failing `<` reports before stderr is redirected,
+  # so a missing file (the normal "no demand" case) logged an error every tick.
+  [ -r "$1" ] || return 1
   read -r ts _ < "$1" 2> /dev/null || true
   [[ "$ts" =~ ^[0-9]+$ ]] || return 1
   now=$(date -u +%s)
@@ -320,11 +323,12 @@ run_cycle() {
         # looping (and, for ios, keep refreshing the lease) until it has really exited, so neither
         # `yielded` nor a freed lease can be published while that VM is alive.
         write_state releasing
+      else
+        ghr_log "runner $name busy (rc=$rc): letting the job finish"
+        # A shutdown re-asks every tick (as before); other reasons back off so a long job does not
+        # cost an API listing per tick.
+        if [ "$TERMINATING" -eq 1 ]; then next_probe=0; else next_probe=$(( $(date -u +%s) + BUSY_REPROBE_SECS )); fi
       fi
-      ghr_log "runner $name busy (rc=$rc): letting the job finish"
-      # A shutdown re-asks every tick (as before); other reasons back off so a long job does not
-      # cost an API listing per tick.
-      if [ "$TERMINATING" -eq 1 ]; then next_probe=0; else next_probe=$(( $(date -u +%s) + BUSY_REPROBE_SECS )); fi
     fi
     write_state "$STATE_NAME"
     nap
