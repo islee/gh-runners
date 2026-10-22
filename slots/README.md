@@ -1,9 +1,10 @@
-# slots/ — slot-loop controller for a self-hosted runner pool (macOS host + Lima VM; optional Proxmox host)
+# slots/ — slot-loop controller for a self-hosted runner pool (macOS host + Lima VM / Tart VM; optional Proxmox host)
 
 ## Purpose
 
-Keeps N single-use ("JIT") GitHub Actions runners alive on one Apple Silicon Mac, inside a Lima VM,
-and publishes whether the pool is healthy so callers can fall back to GitHub-hosted runners.
+Keeps N single-use ("JIT") GitHub Actions runners alive on one Apple Silicon Mac, inside a Lima VM
+(plus, optionally, one on-demand Tart macOS VM for Xcode builds), and publishes whether the pool is
+healthy so callers can fall back to GitHub-hosted runners.
 Org-level JIT runners need no repo registration; each slot mints a one-job runner, runs it in a
 container, and repeats. Everything org-specific comes from one config file; nothing is hardcoded.
 
@@ -21,23 +22,24 @@ LaunchDaemon dev.ghr.slot.light-N  (_ghrctl)        LaunchDaemon dev.ghr.heartbe
 | `lib/gh-app.sh` | sourced | Config load, runner-name regex, App JWT (openssl RS256), cached installation token, `gh_api` |
 | `mint-jit.sh <name> <label...>` | `_ghrctl` | Policy gate + `generate-jitconfig`; prints only the JIT config |
 | `reconcile.sh <name>` | `_ghrctl` | Deletes a stale offline runner with exactly that name |
-| `slot-loop.sh <class> <n>` | `_ghrctl` | Forever loop, state file, backoff 30 to 300 s, graceful SIGTERM |
-| `launch.sh <class> <n>` | `ghr` via sudo | Privilege boundary: validates args/stdin/image, pool ensure, LAN preflight, `docker run` |
+| `slot-loop.sh <class> <n>` | `_ghrctl` | Forever loop, state file, backoff 30 to 300 s, graceful SIGTERM; the ios capacity lease and the supabase yield |
+| `launch.sh <class> <n>` | `ghr` via sudo | Privilege boundary: validates args/stdin/image, pool ensure, LAN preflight, `docker run` (light) / per-job Lima VM (supabase) / per-job Tart VM (ios) |
 | `pool.sh ensure\|rebuild` | `ghr` | Clone/start the Lima pool VM (`rebuild` is a stub) |
-| `heartbeat.sh` | `_ghrstate` | Computes the state (`down`, `ok`, `ok@<ts>/sat=<classes>`, `saturated`), writes the repo variable, runs the tripwire |
+| `heartbeat.sh` | `_ghrstate` | Computes the state (`down`, `ok`, `ok@<ts>/sat=<classes>`, `saturated`), writes the repo variable, runs the tripwire and the ios demand probe |
 | `install.sh` | root | Accounts, dirs, sudoers, scripts, config, plists; `--dry-run`, `--uninstall [--purge]` |
 | `reload-slot.sh` | root (one-shot LaunchDaemon) | Waits for a busy slot daemon to exit, then bootstraps its new plist (scheduled by `install.sh`) |
 | `launchd/*.plist` | root | Templates for slot / heartbeat / pool daemons (`@PLACEHOLDER@` rendered by install.sh) |
 | `config.example.env` | root | Template for `/usr/local/etc/ghr/slots.env` (no secrets) |
 | `../images/light/`, `../images/build-light.sh` | ghr | Derived runner image (hosted-parity tools + pre-warmed tool cache) and its Lima build script |
 | `../images/supabase/`, `../images/build-supabase.sh` | ghr | Golden VM for the supabase class (provision, tool cache, full Supabase image pre-pull) |
+| `../images/ios/`, `../images/build-ios.sh` | ghr | Golden Tart VM for the ios class (pinned Xcode base image + actions/runner, sshd off); operator steps, pf anchor and Tart install in `images/ios/README.md` |
 | `launch-pve.sh <class> <n>` | root via sudo (Proxmox host) | Proxmox counterpart of `launch`'s supabase path: linked clone of the golden template, per-VM firewall file, guest-agent preflight + JIT hand-off, destroy on every exit |
 | `install-pve.sh` | root (Proxmox host) | Account `ghrctl`, scripts, sudoers, `ghr-slot@.service` instances for `PVE_SLOTS`; `--dry-run`, `--uninstall [--purge]` |
 | `slot-unit.sh <class>-<n>` | `ghrctl` (systemd) | Splits the unit instance name and execs `slot-loop` |
 | `systemd/ghr-slot@.service` | root | Template unit rendered by `install-pve.sh` |
 | `lib/pve-fw.sh`, `lib/pve-guest.sh` | sourced | The egress-isolation firewall file (single source) and bounded `qm guest exec` helpers |
 | `../images/build-supabase-pve.sh`, `../images/supabase/{ghr-runner.service,ghr-runner-run,pve-user-data.yaml}` | root (Proxmox host) | Proxmox golden build and the guest-side per-job runner unit |
-| `tests/*.bats`, `tests/helpers.bash`, `tests/run-bats.sh` | CI | Offline suite; curl/limactl/qm/sudo are shims |
+| `tests/*.bats`, `tests/helpers.bash`, `tests/run-bats.sh` | CI | Offline suite; curl/limactl/tart/qm/sudo are shims |
 
 ## Patterns
 
@@ -57,6 +59,10 @@ LaunchDaemon dev.ghr.slot.light-N  (_ghrctl)        LaunchDaemon dev.ghr.heartbe
 7. **Tests are offline.** `tests/helpers.bash` generates a throwaway RSA key per test and shims
    `curl`/`limactl`/`sudo`; negative assertions use `refute` (a bare `! cmd` is a no-op under `set -e`).
 8. **bash 3.2 compatible** (macOS `/bin/bash`): no associative arrays, `mapfile`, or `${v,,}`.
+9. **Capacity is negotiated through two small files, never through signals.** The heartbeat writes
+   `demand/ios` (`<epoch> <count>`), the ios loop writes `capacity/ios.lease` (`<epoch>`), and every
+   reader judges freshness from the epoch INSIDE the file, with a future-skew check. Stale or
+   garbled means "no", so a crashed writer can only ever release capacity, never hold it.
 
 ## Install / operate
 
@@ -83,8 +89,9 @@ Operator clears a tripwire by deleting `/var/db/ghr/tripwire` after removing the
    abandoned; if busy, the job finishes first. A second signal kills the launch. `ExitTimeOut`
    is 21700 s to match the 6 h job limit. The sudo'd launch cannot be signalled by `_ghrctl`;
    deleting the runner makes the in-container listener exit, which ends it.
-7. `ok` cannot see the job queue (the state App has no `Actions: read`), so a queue stuck behind a
-   healthy-looking pool is invisible to the heartbeat; the org-side rescuer covers that case.
+7. `ok` does not look at the job queue, so a queue stuck behind a healthy-looking pool is invisible to
+   the published state; the org-side rescuer covers that case. (Only the optional ios demand probe
+   reads the queue, and only to wake the ios slot; it needs the State App's `Actions: read`.)
    "Stuck" is judged from GitHub runner status instead: a slot in idle-prep/registered/backoff
    for over 120 s whose runner is not `online` marks the pool `down`. Slot files with a
    timestamp more than 5 s in the future also read as `down`.
@@ -144,3 +151,42 @@ Operator clears a tripwire by deleting `/var/db/ghr/tripwire` after removing the
    finished (a guest whose network is not up yet would "cannot reach" anything). IPv6: only link-local
    and ULA ranges are dropped; give the VM no global IPv6 route to the LAN. The golden's storage must
    support linked clones (lvm-thin, zfs, qcow2 on a directory).
+21. ios class (`IOS_SLOTS=1`, hard max 1): ONE Tart macOS VM per job for Xcode builds, cloned from the
+   STOPPED golden (`images/build-ios.sh`), booted headless by a background `tart run`, reached only
+   through the Tart guest agent (`tart exec`, as the guest's `admin`; sshd is off in the golden). The
+   slot is DORMANT (no runner, no VM) until a job labelled `IOS_LABELS` is queued in one of
+   `IOS_DEMAND_REPOS`: the heartbeat probes `actions/runs?status=queued|in_progress` (+ each run's
+   jobs) every minute and writes `demand/ios`; a JIT runner registered on demand is assigned the
+   already-queued job. Probe cost is 2 + (distinct queued/in-progress runs) API calls per repo per
+   minute, so list only repos that really use the label. An API failure leaves the file alone (it
+   ages out after `DEMAND_FRESH_SECS`, 150 s) and never changes the published state.
+22. Why the supabase slots yield: a macOS VM needs 8 GiB, so with the light VM (8) and 4 GiB per
+   supabase VM it fits only while at most `IOS_SUPA_KEEP` (default 1) supabase VMs exist. Order, as
+   enforced by `slot-loop.sh`: demand -> ios takes the lease (`waiting-capacity`) -> each supabase slot
+   above KEEP releases its idle runner or finishes its job, destroys its VM, and ONLY THEN writes
+   `yielded` -> ios sees every such slot `yielded` (fresh) -> mint + launch. The wait is bounded by
+   `IOS_YIELD_WAIT_SECS` (3600): on expiry the lease is dropped and the cycle backs off. The lease is
+   refreshed every `TICK` while the ios slot waits or runs; it is removed when demand is gone, on
+   SIGTERM and on any exit, and a lease older than `LEASE_FRESH_SECS` (60 s) is ignored. After a job
+   with demand still fresh the lease is kept and the next job starts without letting supabase back in.
+   An ios runner that is idle while the demand has gone (job cancelled) is released like a SIGTERM'd
+   one, so a vanished job cannot pin the lease; a busy runner is asked again only every
+   `BUSY_REPROBE_SECS`. While yielded or waiting, those slots count as busy for saturation, so
+   supabase/ios jobs spill to hosted runners instead of queueing; they are healthy states, and an ios
+   runner may be absent for `IOS_STUCK_SECS` (300) before the pool reads `down` (macOS boot).
+23. Tart egress: the guest sits on Virtualization.framework NAT (`bridge100`, 192.168.64.0/24,
+   gateway/DNS 192.168.64.1). That traffic is forwarded by the kernel and is NOT a socket of user
+   `ghr`, so the existing `user ghr` pf rules do not cover it; `images/ios/README.md` gives the extra
+   anchor rules. The in-guest preflight (`tart exec ... /usr/bin/nc -z -G 5 <host> <port>` for EVERY
+   `IOS_LAN_PROBES` entry, after a `/usr/bin/true` usability check) is the enforcement check: only nc
+   exit 1 counts as blocked, everything else refuses (exit 3). `LAN_PROBE` is not used for ios (a NAT
+   guest cannot reach the host's own LAN address even unfiltered). Before `tart run`, `launch.sh`
+   unlocks `ghr`'s login keychain (`security unlock-keychain` with the password on stdin; a macOS guest
+   will not start otherwise); setup is an operator step in `images/ios/README.md`.
+24. ios VM lifecycle hygiene: `TART_NO_AUTO_PRUNE=1` is exported so a clone can never evict the
+   operator-pulled OCI base; the orphan sweep only touches canonical `ghr-ios-<n>` names that are not
+   a configured slot (never the golden, never the `ghr-ios-build` VM); destroy is stop (bounded) ->
+   reap the background `tart run` -> delete (bounded) -> verify via `tart list`, and an unreadable list
+   is a LEAK, not "gone". The `tart list --format json` shape (`Name`, `State`/`Running`, `Source`) is
+   parsed in ONE function (`tart_vm_states` in `launch.sh`, mirrored by `vm_field` in
+   `build-ios.sh`) and was taken from Tart's source, not from a populated list.

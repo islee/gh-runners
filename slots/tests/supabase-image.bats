@@ -213,7 +213,10 @@ PY
 
 @test "images/ hygiene: no org names, LAN addresses or key material" {
   a="lin""ple"; b="gyeol""hada"; c="BEGIN [A-Z ]*PRIV""ATE KEY"; d="192\.168\."
-  refute grep -rniE "$a|$b|$c|$d" "$SLOTS_DIR/../images"
+  refute grep -rniE "$a|$b|$c" "$SLOTS_DIR/../images"
+  # 192.168.64.0/24 is Tart's fixed vmnet NAT range (images/ios), not anyone's LAN
+  hits=$(grep -rnE "$d" "$SLOTS_DIR/../images" | grep -v '192\.168\.64\.' || true)
+  [ -z "$hits" ]
 }
 
 # ── build-supabase.sh ─────────────────────────────────────────────────────────

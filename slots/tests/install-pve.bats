@@ -149,7 +149,9 @@ plan() { bash "$(IPVE)" --dry-run --config "$W/pve.env" "$@" 2>&1; }
     grep -q "^#$k=" "$f"
   done
   # documentation addresses only
-  refute grep -E '^[^#]*(10|192\.168|172\.(1[6-9]|2[0-9]|3[01]))\.[0-9]+\.[0-9]+' "$f"
+  # (192.168.64.x is Tart's fixed vmnet NAT range used by the ios probes, a product constant)
+  hits=$(grep -E '^[^#]*(10|192\.168|172\.(1[6-9]|2[0-9]|3[01]))\.[0-9]+\.[0-9]+' "$f" | grep -v '192\.168\.64\.' || true)
+  [ -z "$hits" ]
   # the template still loads as a config
   GHR_CONFIG="$f" bash -c 'source "$1"; ghr_load_config' _ "$SLOTS_DIR/lib/gh-app.sh"
 }
