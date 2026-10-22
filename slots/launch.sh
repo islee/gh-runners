@@ -1,6 +1,6 @@
 #!/bin/bash
 # launch.sh <class> <n> — run ONE ephemeral runner for slot <class>-<n> (light: container in the
-# shared pool VM; supabase: a throwaway per-job VM).
+# shared pool VM; supabase: a throwaway per-job Lima VM; ios: a throwaway per-job Tart macOS VM).
 #
 # Context: installed root-owned as /usr/local/libexec/ghr/launch and invoked by slot-loop.sh via
 #   printf %s "$JIT" | sudo -n -u ghr /usr/local/libexec/ghr/launch light 3
@@ -17,10 +17,17 @@
 # and the VM is stopped + deleted on EVERY exit path (success, failure, preflight refusal, timeout,
 # signal). The golden is never started, stopped, or modified here.
 #
+# ios class: same shape with Tart instead of Lima. `ghr-ios-1` is cloned from the STOPPED golden
+# (IOS_GOLDEN), booted headless by a background `tart run` (it blocks for the VM's lifetime), the
+# guest agent is awaited, the LAN preflight runs INSIDE the guest (`tart exec ... nc`), then the
+# runner starts through `tart exec -i` with the JIT on stdin. The VM is stopped + deleted on every
+# exit path. Tart's NAT traffic is forwarded by the kernel and is NOT covered by the `user ghr` pf
+# rules, so the in-guest preflight is the enforcement check (images/ios/README.md has the anchor).
+#
 # Exit codes: 0/N = runner's own exit code, 2 = bad args/stdin/config, 3 = preflight refused
 # (guest can reach the LAN), 124 = job timeout hit.
 #
-# Dependencies: lib/gh-app.sh (config), pool.sh (ensure), limactl.
+# Dependencies: lib/gh-app.sh (config), pool.sh (ensure), limactl (light, supabase), tart (ios).
 
 # CRITICAL (privilege boundary): pin PATH before anything else so no external is resolved from
 # a caller-controlled directory (sudo's secure_path is the belt, this is the braces).
@@ -35,7 +42,9 @@ if [ "$GHR_INSTALLED" = 1 ]; then
   unset LIMA_HOME BASH_ENV ENV CDPATH GHR_CONFIG LIMACTL POOL_INSTANCE POOL_GOLDEN \
     JOB_TIMEOUT_SECS SUPA_GOLDEN SUPA_DESTROY_TIMEOUT GHR_POOL_LOCK POOL_LOCK_WAIT TMPDIR GH_API_BASE \
     ORG RUNNER_GROUP_ID LIGHT_SLOTS LIGHT_LABELS LIGHT_IMAGE ALLOWED_LABELS LAN_PROBE \
-    SUPABASE_SLOTS SUPABASE_LABELS SUPA_MEM SUPA_CPUS
+    SUPABASE_SLOTS SUPABASE_LABELS SUPA_MEM SUPA_CPUS \
+    TART TART_HOME TART_NO_AUTO_PRUNE IOS_SLOTS IOS_LABELS IOS_MEM_MB IOS_CPUS IOS_GOLDEN IOS_RUNNER_DIR \
+    IOS_BOOT_TIMEOUT IOS_BOOT_POLL IOS_STOP_TIMEOUT IOS_LAN_PROBES IOS_KEYCHAIN IOS_KEYCHAIN_PASS SECURITY
 fi
 
 set -uo pipefail
@@ -48,6 +57,20 @@ LIMACTL="${LIMACTL:-/usr/local/bin/limactl}"
 POOL_INSTANCE="${POOL_INSTANCE:-ghr-pool}"
 LIGHT_MAX=6
 SUPA_MAX=3
+# macOS licensing allows 2 VMs per host; we use 1 (memory). Config may lower it, never raise it.
+IOS_MAX=1
+TART="${TART:-/usr/local/bin/tart}"
+# Absolute: PATH is pinned, and this binary handles the keychain password.
+SECURITY="${SECURITY:-/usr/bin/security}"
+IOS_GOLDEN="${IOS_GOLDEN:-ghr-ios-golden}"
+IOS_MEM_MB="${IOS_MEM_MB:-8192}"
+IOS_CPUS="${IOS_CPUS:-4}"
+IOS_RUNNER_DIR="${IOS_RUNNER_DIR:-/Users/admin/actions-runner}"
+# macOS boot to a reachable guest agent is ~1-2 min; poll every IOS_BOOT_POLL s up to IOS_BOOT_TIMEOUT s.
+IOS_BOOT_TIMEOUT="${IOS_BOOT_TIMEOUT:-300}"
+IOS_BOOT_POLL="${IOS_BOOT_POLL:-5}"
+# `tart stop` is bounded separately from delete: a wedged guest must not hold the slot for minutes.
+IOS_STOP_TIMEOUT="${IOS_STOP_TIMEOUT:-30}"
 SUPA_GOLDEN="${SUPA_GOLDEN:-ghr-supa-golden}"
 # Upper bound for each stop/delete/list of a per-job VM; a hung limactl must not hang the slot.
 SUPA_DESTROY_TIMEOUT="${SUPA_DESTROY_TIMEOUT:-120}"
@@ -62,6 +85,7 @@ launch_validate_args() {
   case "$class" in
     light) max=$LIGHT_MAX; cfg=${LIGHT_SLOTS:-$LIGHT_MAX} ;;
     supabase) max=$SUPA_MAX; cfg=${SUPABASE_SLOTS:-0} ;;
+    ios) max=$IOS_MAX; cfg=${IOS_SLOTS:-0} ;;
     *) echo "launch: unsupported class: $class" >&2; return 1 ;;
   esac
   [[ "$n" =~ ^[1-9][0-9]*$ ]] || { echo "launch: invalid slot number" >&2; return 1; }
@@ -76,6 +100,23 @@ launch_validate_supa() {
   [[ "${SUPA_CPUS:-}" =~ ^[1-9][0-9]?$ ]] || { echo "launch: SUPA_CPUS must be 1..99" >&2; return 1; }
 }
 
+# launch_validate_ios — VM sizing, golden and runner dir come from root-owned config but are still
+# validated: they end up in tart argv and in a guest `cd`.
+launch_validate_ios() {
+  [[ "${IOS_MEM_MB:-}" =~ ^[1-9][0-9]{3,5}$ ]] || { echo "launch: IOS_MEM_MB must be MiB, e.g. 8192" >&2; return 1; }
+  [[ "${IOS_CPUS:-}" =~ ^[1-9][0-9]?$ ]] || { echo "launch: IOS_CPUS must be 1..99" >&2; return 1; }
+  # WHY leading alnum: a leading "-" would be parsed by tart as an option.
+  [[ "${IOS_GOLDEN:-}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || { echo "launch: IOS_GOLDEN invalid" >&2; return 1; }
+  # The golden must never collide with the per-slot names the destroy path is allowed to delete.
+  ! [[ "$IOS_GOLDEN" =~ ^ghr-ios-[0-9]+$ ]] || { echo "launch: IOS_GOLDEN collides with a slot VM name" >&2; return 1; }
+  [[ "${IOS_RUNNER_DIR:-}" =~ ^/[A-Za-z0-9._/-]+$ ]] || { echo "launch: IOS_RUNNER_DIR invalid" >&2; return 1; }
+  ghr_valid_probe_list "${IOS_LAN_PROBES:-}" || { echo "launch: IOS_LAN_PROBES must be a non-empty host:port list" >&2; return 1; }
+  [[ "${IOS_KEYCHAIN:-}" =~ ^/[A-Za-z0-9._/-]+$ ]] && [[ "${IOS_KEYCHAIN_PASS:-}" =~ ^/[A-Za-z0-9._/-]+$ ]] \
+    || { echo "launch: IOS_KEYCHAIN/IOS_KEYCHAIN_PASS invalid" >&2; return 1; }
+  [[ "${IOS_BOOT_TIMEOUT:-}" =~ ^[1-9][0-9]{0,4}$ ]] && [[ "${IOS_BOOT_POLL:-}" =~ ^[1-9][0-9]?$ ]] \
+    && [[ "${IOS_STOP_TIMEOUT:-}" =~ ^[1-9][0-9]{0,3}$ ]] || { echo "launch: IOS_BOOT_TIMEOUT/IOS_BOOT_POLL/IOS_STOP_TIMEOUT invalid" >&2; return 1; }
+}
+
 # The image must be immutable: either repo@sha256:<digest> or a bare LOCAL image ID
 # (sha256:<64 hex>, as printed by images/build-light.sh). A mutable tag would let an upstream push
 # change the code that runs with the JIT credential.
@@ -86,25 +127,62 @@ launch_validate_image() {
   [[ "$img" =~ ^[a-z0-9][a-z0-9./_-]*(:[A-Za-z0-9._-]+)?@sha256:[0-9a-f]{64}$ ]]
 }
 
-# launch_preflight [INSTANCE] — exit 0 iff the guest (default: the pool VM) CANNOT reach the LAN
-# probe target.
-# WHY from inside the guest: the pf rule blocks the VM's egress; checking from the host would
-# prove nothing. Fails closed: an unset LAN_PROBE or an unusable guest shell is a refusal.
-launch_preflight() {
-  [[ "${LAN_PROBE:-}" =~ ^[A-Za-z0-9.-]+:[0-9]+$ ]] || { ghr_log "preflight: LAN_PROBE unset/invalid, refusing"; return 3; }
-  local host=${LAN_PROBE%:*} port=${LAN_PROBE##*:} inst=${1:-$POOL_INSTANCE}
-  "$LIMACTL" shell "$inst" -- true < /dev/null > /dev/null 2>&1 \
-    || { ghr_log "preflight: guest shell unusable, refusing"; return 3; }
+# ── egress preflight: one verdict, one probe per transport ──────────────────────
+# preflight_probe_<transport> INSTANCE HOST PORT — run the connect probe INSIDE the guest and print
+# nothing; return 0 = the guest CAN reach the target, 1 = it cannot (blocked), 2 = the probe result
+# is uninterpretable. The shared verdict in launch_preflight is the only place that decides.
+
+preflight_ready_lima() { "$LIMACTL" shell "$1" -- true < /dev/null > /dev/null 2>&1; }
+preflight_probe_lima() {
   # Only rc 1 (connect refused/unreachable) and 124 (timeout: packets dropped) mean "blocked".
   # 0 = reachable; anything else (2 syntax, 126/127 missing tool, 255 ssh failure) is a probe we
   # cannot interpret, and an uninterpretable probe must not pass. /usr/bin/timeout runs in the
   # Linux guest, not on the host.
-  "$LIMACTL" shell "$inst" -- /usr/bin/timeout 5 bash -c "exec 3<>/dev/tcp/${host}/${port}" < /dev/null > /dev/null 2>&1
-  case $? in
-    1 | 124) return 0 ;;
-    0) ghr_log "preflight: guest CAN reach $LAN_PROBE -- egress isolation broken, refusing"; return 3 ;;
-    *) ghr_log "preflight: probe result uninterpretable, refusing"; return 3 ;;
-  esac
+  "$LIMACTL" shell "$1" -- /usr/bin/timeout 5 bash -c "exec 3<>/dev/tcp/${2}/${3}" < /dev/null > /dev/null 2>&1
+  case $? in 0) return 0 ;; 1 | 124) return 1 ;; *) return 2 ;; esac
+}
+
+preflight_ready_tart() { run_bounded 20 "$TART" exec "$1" /usr/bin/true < /dev/null > /dev/null 2>&1; }
+preflight_probe_tart() {
+  # macOS guest: /usr/bin/nc -z -G <connect timeout> (no -w). nc exits 1 on refusal, unreachable and
+  # timeout alike (= blocked); 0 = connected; `tart exec` passes the guest exit code through unchanged. 127/126 (no nc), a `tart exec` transport error and signals
+  # are uninterpretable. The agent was proven reachable by preflight_ready_tart right before.
+  run_bounded 30 "$TART" exec "$1" /usr/bin/nc -z -G 5 "$2" "$3" < /dev/null > /dev/null 2>&1
+  case $? in 0) return 0 ;; 1) return 1 ;; *) return 2 ;; esac
+}
+
+# ghr_valid_probe_list LIST — non-empty, space/comma separated host:port entries.
+ghr_valid_probe_list() {
+  local p n=0
+  for p in ${1//,/ }; do
+    [[ "$p" =~ ^[A-Za-z0-9.-]+:[0-9]+$ ]] || return 1
+    n=$((n + 1))
+  done
+  [ "$n" -gt 0 ]
+}
+
+# launch_preflight [INSTANCE [TRANSPORT]] — exit 0 iff the guest (default: the pool VM, transport
+# lima) CANNOT reach ANY probe target. Targets: LAN_PROBE (lima) / every entry of IOS_LAN_PROBES (tart).
+# WHY a separate ios list: LAN_PROBE is the HOST's own LAN address, which a Tart NAT guest cannot reach
+# even with no filtering at all, so it would prove nothing there. Pick targets that ARE reachable when
+# unfiltered (a LAN device, the vmnet gateway's sshd).
+# WHY from inside the guest: the pf rule blocks the VM's egress; checking from the host would
+# prove nothing. Fails closed: no/invalid targets or an unusable guest shell is a refusal.
+launch_preflight() {
+  local inst=${1:-$POOL_INSTANCE} tr=${2:-lima} targets probe rc
+  case $tr in tart) targets=${IOS_LAN_PROBES:-} ;; *) targets=${LAN_PROBE:-} ;; esac
+  ghr_valid_probe_list "$targets" || { ghr_log "preflight: probe target(s) unset/invalid, refusing"; return 3; }
+  "preflight_ready_$tr" "$inst" || { ghr_log "preflight: guest shell unusable, refusing"; return 3; }
+  for probe in ${targets//,/ }; do
+    rc=0
+    "preflight_probe_$tr" "$inst" "${probe%:*}" "${probe##*:}" || rc=$?
+    case $rc in
+      1) ;;
+      0) ghr_log "preflight: guest CAN reach $probe -- egress isolation broken, refusing"; return 3 ;;
+      *) ghr_log "preflight: probe result uninterpretable, refusing"; return 3 ;;
+    esac
+  done
+  return 0
 }
 
 launch_cleanup() {
@@ -244,6 +322,151 @@ supa_run() {
   return "$rc"
 }
 
+# ── ios class: one throwaway Tart macOS VM per job ────────────────────────────
+
+# tart_vm_states — print `name<TAB>state` for every LOCAL Tart VM (state: stopped|running|suspended).
+# Return 1 when `tart list` fails or its output is not parseable, so callers can tell "the VM is
+# gone" from "I could not look".
+# NOTE: this is the ONLY place that knows the `tart list --format json` shape: a JSON array of
+# objects with "Name", "State" (older builds only a "Running" bool) and "Source" (local|OCI). OCI
+# cache entries are skipped. UNVERIFIED against a populated list on a real host -- correct HERE
+# if the live shape differs.
+tart_vm_states() {
+  local out
+  out=$(run_bounded "$SUPA_DESTROY_TIMEOUT" "$TART" list --format json < /dev/null 2> /dev/null) || return 1
+  printf '%s' "$out" | python3 -I -c '
+import sys, json
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+if not isinstance(d, list):
+    sys.exit(1)
+for v in d:
+    if not isinstance(v, dict) or str(v.get("Source", "local")).lower() == "oci":
+        continue
+    name = str(v.get("Name", ""))
+    st = str(v.get("State") or ("running" if v.get("Running") else "stopped")).lower()
+    if name and "\t" not in name and "\n" not in name:
+        print("%s\t%s" % (name, st))
+'
+}
+
+# tart_state VM — print the VM's state ("" = no such local VM). Returns 1 if the list is unavailable.
+tart_state() {
+  local lines
+  lines=$(tart_vm_states) || return 1
+  printf '%s\n' "$lines" | awk -F'\t' -v nm="$1" '$1 == nm && !f { print $2; f = 1 }'
+}
+
+# ios_reap_run — make sure the background `tart run` is gone (it exits by itself once the VM stops).
+ios_reap_run() {
+  [ -n "${IOS_RUN_PID:-}" ] || return 0
+  for _ in 1 2 3; do kill -0 "$IOS_RUN_PID" 2> /dev/null || break; sleep 1; done
+  if kill -0 "$IOS_RUN_PID" 2> /dev/null; then
+    kill -TERM "$IOS_RUN_PID" 2> /dev/null
+    sleep 1
+    kill -KILL "$IOS_RUN_PID" 2> /dev/null
+  fi
+  wait "$IOS_RUN_PID" 2> /dev/null || true
+  IOS_RUN_PID=""
+}
+
+# ios_destroy VM — bounded `tart stop`, reap the background `tart run`, bounded `tart delete`, then
+# VERIFY the VM is gone via `tart list`. Returns 1 and logs a loud LEAK error if it is not (also
+# when the list itself is unavailable: "could not look" is not "gone"). Same contract as
+# supa_destroy; the golden name is refused outright.
+ios_destroy() {
+  local vm=$1 attempt st
+  [ "$vm" != "$IOS_GOLDEN" ] || { ghr_log "ERROR refusing to destroy the golden"; return 1; }
+  for attempt in 1 2; do
+    run_bounded "$IOS_STOP_TIMEOUT" "$TART" stop "$vm" < /dev/null > /dev/null 2>&1 \
+      || ghr_log "WARN tart stop $vm failed or timed out (attempt $attempt)"
+    ios_reap_run
+    run_bounded "$SUPA_DESTROY_TIMEOUT" "$TART" delete "$vm" < /dev/null > /dev/null 2>&1 \
+      || ghr_log "WARN tart delete $vm failed or timed out (attempt $attempt)"
+    if st=$(tart_state "$vm") && [ -z "$st" ]; then return 0; fi
+  done
+  ghr_log "ERROR LEAK: VM $vm still present or unverifiable after cleanup"
+  return 1
+}
+
+# ios_sweep — delete ghr-ios-<n> VMs that do not correspond to a configured slot (crashed runs, a
+# lowered IOS_SLOTS). Only canonical per-slot names are candidates: the golden (ghr-ios-golden) and
+# the build VM (ghr-ios-build, images/build-ios.sh runs as this same account) never match.
+ios_sweep() {
+  local lines name n keep
+  lines=$(tart_vm_states) || { ghr_log "ios: cannot list VMs, skipping sweep"; return 0; }
+  for name in $(printf '%s\n' "$lines" | cut -f1); do
+    [[ "$name" =~ ^ghr-ios-[0-9]+$ ]] || continue
+    keep=0
+    if [[ "$name" =~ ^ghr-ios-([1-9][0-9]*)$ ]]; then
+      n=${BASH_REMATCH[1]}
+      [ "$n" -le "${IOS_SLOTS:-0}" ] && [ "$n" -le "$IOS_MAX" ] && keep=1
+    fi
+    [ "$keep" -eq 1 ] || { ghr_log "ios: sweeping orphan VM $name"; ios_destroy "$name" || true; }
+  done
+}
+
+# ios_wait_agent — poll the guest agent (`tart exec VM /usr/bin/true`) until it answers. Fails early
+# when the background `tart run` died, on a signal, or after IOS_BOOT_TIMEOUT seconds.
+ios_wait_agent() {
+  local vm=$1 t0 now
+  t0=$(date -u +%s)
+  while :; do
+    [ "$SIGNALLED" -eq 0 ] || return 143
+    kill -0 "$IOS_RUN_PID" 2> /dev/null || { ghr_log "ios: tart run exited before the guest agent answered"; return 1; }
+    run_bounded 20 "$TART" exec "$vm" /usr/bin/true < /dev/null > /dev/null 2>&1 && return 0
+    now=$(date -u +%s)
+    [ "$((now - t0))" -lt "$IOS_BOOT_TIMEOUT" ] || { ghr_log "ios: guest agent not up after ${IOS_BOOT_TIMEOUT}s"; return 1; }
+    sleep "$IOS_BOOT_POLL"
+  done
+}
+
+# ios_run N JIT — clone the golden, boot headless, wait for the agent, preflight, run the runner
+# through the agent, always delete.
+ios_run() {
+  local n=$1 jit=$2 vm="ghr-ios-$1" rc=0 st
+  [ "$vm" != "$IOS_GOLDEN" ] || return 2
+  # Same rule as the supabase golden: it must exist and be STOPPED; fixing it is the build script's job.
+  st=$(tart_state "$IOS_GOLDEN") || { ghr_log "ios: cannot read the VM list"; return 1; }
+  [ "$st" = "stopped" ] || { ghr_log "ios: golden $IOS_GOLDEN is '${st:-missing}', need stopped"; return 1; }
+  ios_sweep
+  st=$(tart_state "$vm") || { ghr_log "ios: cannot read the VM list"; return 1; }
+  if [ -n "$st" ]; then
+    ghr_log "ios: removing leftover $vm ($st)"
+    ios_destroy "$vm" || return 1
+  fi
+  # From here on the VM must not outlive this call, whatever happens.
+  IOS_VM=$vm
+  "$TART" clone "$IOS_GOLDEN" "$vm" < /dev/null > /dev/null \
+    || { ghr_log "ios: clone failed"; ios_destroy "$vm"; return 1; }
+  "$TART" set "$vm" --cpu "$IOS_CPUS" --memory "$IOS_MEM_MB" --random-mac < /dev/null > /dev/null \
+    || { ghr_log "ios: set failed"; ios_destroy "$vm"; return 1; }
+  # CRITICAL: a macOS guest cannot start (VZErrorDomain -9 "Failed to get current host key") unless the
+  # VM owner's login keychain exists and is UNLOCKED. The password reaches `security` on STDIN only
+  # (no -p: argv is world-readable). Failure = refuse; the VM is never started.
+  "$SECURITY" unlock-keychain "$IOS_KEYCHAIN" < "$IOS_KEYCHAIN_PASS" > /dev/null 2>&1 \
+    || { ghr_log "ios: cannot unlock the login keychain $IOS_KEYCHAIN (see images/ios/README.md), refusing"; ios_destroy "$vm"; return 1; }
+  # `tart run` blocks for the VM's whole life: background it, stdin closed, output to our stderr
+  # (the slot log).
+  "$TART" run "$vm" --no-graphics --no-audio < /dev/null >&2 &
+  IOS_RUN_PID=$!
+  rc=0
+  ios_wait_agent "$vm" || rc=$?
+  [ "$rc" -eq 0 ] || { ios_destroy "$vm"; return "$rc"; }
+  [ "$SIGNALLED" -eq 0 ] || { ios_destroy "$vm"; return 143; }
+  launch_preflight "$vm" tart || { rc=$?; ios_destroy "$vm"; return "$rc"; }
+  [ "$SIGNALLED" -eq 0 ] || { ios_destroy "$vm"; return 143; }
+  # The guest agent runs the command as the guest's default user (admin); read -r pulls the JIT
+  # from stdin (-i attaches ours), same convention as the other classes. The dir is an argument,
+  # not interpolated into the script.
+  run_watched "$jit" "$TART" exec -i "$vm" /bin/bash -c \
+    'cd "$1" && read -r J && exec ./run.sh --jitconfig "$J"' _ "$IOS_RUNNER_DIR" || rc=$?
+  if ios_destroy "$vm"; then IOS_VM=""; elif [ "$rc" -eq 0 ]; then rc=1; fi
+  return "$rc"
+}
+
 main() {
   # cwd must be readable by `ghr`: sudo keeps the caller's cwd (_ghrctl's 0700 home).
   cd / || exit 2
@@ -263,25 +486,41 @@ main() {
     HOME=$home
     export HOME
   fi
+  # WHY forced, not defaulted: the keychain and its password file are ghr's own, never caller input.
+  IOS_KEYCHAIN="$HOME/Library/Keychains/login.keychain-db"
+  IOS_KEYCHAIN_PASS="$HOME/.ghr/keychain.pass"
+  if [ "$GHR_INSTALLED" != 1 ]; then
+    IOS_KEYCHAIN="${TEST_IOS_KEYCHAIN:-$IOS_KEYCHAIN}"
+    IOS_KEYCHAIN_PASS="${TEST_IOS_KEYCHAIN_PASS:-$IOS_KEYCHAIN_PASS}"
+  fi
   launch_validate_args "$1" "$2" || exit 2
   local class=$1 n=$2 cname="ghr-$1-$2" jit=""
   IFS= read -r jit || true
   [[ "$jit" =~ ^[A-Za-z0-9+/=_-]+$ ]] || { echo "launch: stdin is not a JIT config" >&2; exit 2; }
-  if [ "$class" = "light" ]; then
-    launch_validate_image "${LIGHT_IMAGE:-}" || { echo "launch: LIGHT_IMAGE must be pinned by @sha256 digest or be a local sha256: image ID" >&2; exit 2; }
-  else
-    launch_validate_supa || exit 2
-  fi
+  case "$class" in
+    light) launch_validate_image "${LIGHT_IMAGE:-}" || { echo "launch: LIGHT_IMAGE must be pinned by @sha256 digest or be a local sha256: image ID" >&2; exit 2; } ;;
+    supabase) launch_validate_supa || exit 2 ;;
+    ios) launch_validate_ios || exit 2 ;;
+  esac
   TIMEOUT_FLAG=$(mktemp "${TMPDIR:-/tmp}/ghr-launch.XXXXXX") || exit 1
   SIGNALLED=0
   SUPA_VM=""
+  IOS_VM=""
+  IOS_RUN_PID=""
   # CRITICAL: a signal must still reach the cleanup below; the trap only records it and kills the
   # job, the straight-line code after run_watched() then deletes the VM. The EXIT trap is the
   # backstop for any path that bails out earlier.
   trap 'SIGNALLED=1; [ -z "${LAUNCH_CHILD:-}" ] || kill -TERM "$LAUNCH_CHILD" 2> /dev/null' TERM INT HUP
-  trap '[ -z "${SUPA_VM:-}" ] || supa_destroy "$SUPA_VM"; rm -f "$TIMEOUT_FLAG"' EXIT
+  trap '[ -z "${SUPA_VM:-}" ] || supa_destroy "$SUPA_VM"; [ -z "${IOS_VM:-}" ] || ios_destroy "$IOS_VM"; rm -f "$TIMEOUT_FLAG"' EXIT
   if [ "$class" = "supabase" ]; then
     supa_run "$n" "$jit"
+    exit $?
+  fi
+  if [ "$class" = "ios" ]; then
+    # WHY: `tart clone` prunes the OCI cache to make room unless told not to; the pulled base image
+    # is operator-managed and must never be evicted by a job.
+    export TART_NO_AUTO_PRUNE=1
+    ios_run "$n" "$jit"
     exit $?
   fi
   "$(sibling pool)" ensure || exit 1
