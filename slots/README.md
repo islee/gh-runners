@@ -179,7 +179,7 @@ Operator clears a tripwire by deleting `/var/db/ghr/tripwire` after removing the
    ios) until the launch has really exited; deleting the runner makes the launch fail and destroy its VM.
    After a failed ios cycle the slot takes no lease for a cooldown (900 s, doubling, max 3600) so the
    supabase slots are not starved by retry thrash. The demand probe runs after the state publish, within
-   a 20 s budget, and only sees `workflow_dispatch` runs (ios workflows must be dispatch-only); a job wakes
+   a 20 s budget, and only sees runs triggered by one of `IOS_DEMAND_EVENTS` (default `workflow_dispatch`; add `pull_request` for label-triggered ios workflows); a job wakes
    the slot when its labels include all of `IOS_LABELS` and nothing beyond them plus `self-hosted`.
 23. Tart egress: the guest sits on Virtualization.framework NAT (`bridge100`, 192.168.64.0/24,
    gateway/DNS 192.168.64.1). That traffic is forwarded by the kernel and is NOT a socket of user
