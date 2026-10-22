@@ -113,3 +113,11 @@ IS reachable when unfiltered, plus the vmnet gateway's sshd (`192.168.64.1:22`).
 11. CocoaPods 1.17 fails on Ruby 4 (`ArgumentError - unknown keyword: quirks_mode`, json 3.x). The Cirrus
    base sets rbenv's global to Ruby 4.x, so `provision.sh` switches it to the newest installed 3.x and gives
    that Ruby the image's cocoapods/fastlane versions; the build fails if `pod --version` does not run.
+12. Simulators: `provision.sh` replaces the base image's device set with ONE named device per screen class
+   (point size + home button / notch / Dynamic Island; `SIM_CLASSES` in the script) on every installed iOS
+   runtime. On the newest runtime the device is named after its model ("iPhone 17"); on older ones,
+   "<model> (iOS <x.y>)", using the newest model of that class the runtime supports (a class with none is
+   skipped, e.g. no 402x874 phone runs iOS 16). Workflows pick a device by name. `IOS_EXTRA_RUNTIMES`
+   (default "18.6 16.4") adds older iOS runtimes, downloaded with `xcodebuild -downloadPlatform`
+   (each several GB inside the VM disk); "" adds none. The build fails if a requested runtime is not
+   available afterwards or fewer than 8 devices were created.

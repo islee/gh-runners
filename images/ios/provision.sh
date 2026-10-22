@@ -1,5 +1,5 @@
 #!/bin/bash
-# provision.sh <runner-version> <runner-sha256> — guest-side provisioning of the ios golden (macOS).
+# provision.sh <runner-version> <runner-sha256> [extra-ios-runtimes] — guest-side provisioning of the ios golden (macOS).
 #
 # Context: copied into the build VM and run by images/build-ios.sh through `tart exec` as the guest's
 # default user (`admin`, passwordless sudo in the Cirrus base images). It adds exactly what an ephemeral
@@ -11,6 +11,11 @@
 #   2. /Applications/Xcode_<version>.app symlink to the image's selected Xcode, so workflows that pin
 #      that path (xcode-select / DEVELOPER_DIR) find it whatever the base image calls its copy.
 #   3. Xcode first-launch tasks and licence, so the first job does not spend minutes on them.
+#   3b. extra iOS simulator runtimes (e.g. "18.6 16.4", older iOS for apps whose deployment target is
+#      below the image's iOS) and ONE named simulator per screen class on every installed iOS runtime
+#      (the SIM_CLASSES table below), replacing the base image's own device set. Names are stable so
+#      workflows and scripts pick a device by name: plain model name on the newest runtime, "<model>
+#      (iOS <x.y>)" on older ones.
 #   4. Remote Login (sshd) OFF: Cirrus images ship admin:admin over ssh; the guest agent is the only
 #      way in. The golden is only ever run behind the in-guest egress preflight, but an open sshd on
 #      the VM network is not something to carry.
@@ -26,9 +31,11 @@ export PATH
 die() { echo "[provision] ERROR $*" >&2; exit 1; }
 log() { echo "[provision] $*" >&2; }
 
-[ "$#" -eq 2 ] || die "usage: provision.sh <runner-version> <runner-sha256>"
+[ "$#" -eq 2 ] || [ "$#" -eq 3 ] || die "usage: provision.sh <runner-version> <runner-sha256> [extra-ios-runtimes]"
 RUNNER_VERSION=$1
 RUNNER_SHA256=$2
+EXTRA_RUNTIMES=${3:-}
+[[ "$EXTRA_RUNTIMES" =~ ^([0-9]{2}\.[0-9]{1,2}( |$))*$ ]] || die "bad extra runtime list: '$EXTRA_RUNTIMES' (want e.g. '18.6 16.4')"
 [[ "$RUNNER_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "bad runner version"
 [[ "$RUNNER_SHA256" =~ ^[0-9a-f]{64}$ ]] || die "bad runner sha256"
 
@@ -86,6 +93,58 @@ fi
 # For the record (the build script shows stderr to the operator).
 xcodebuild -version >&2
 xcrun simctl list runtimes >&2 || log "WARN simctl list runtimes failed"
+
+# 3b. simulator runtimes + one named device per screen class ------------------------------------------
+# Screen classes (layout-relevant: point size + home button / notch / Dynamic Island), one line each:
+# candidate device types newest first. On each runtime the first type that runtime supports is used;
+# a class with no supported type on an older runtime is skipped (e.g. no 402x874 phone runs iOS 16).
+# NOTE: "iPhone 17" is listed first in its class on purpose -- it is the class consumers boot by default.
+SIM_CLASSES='iPhone SE (3rd generation)
+iPhone 17e|iPhone 16e|iPhone 14|iPhone 13
+iPhone 14 Plus|iPhone 13 Pro Max
+iPhone 16|iPhone 15|iPhone 14 Pro
+iPhone 16 Plus|iPhone 15 Plus|iPhone 14 Pro Max
+iPhone 17|iPhone 17 Pro|iPhone 16 Pro
+iPhone Air
+iPhone 17 Pro Max|iPhone 16 Pro Max'
+dl_log="$(mktemp)"
+for v in $EXTRA_RUNTIMES; do
+  log "downloading the iOS $v simulator runtime"
+  # Progress output is long; keep it out of the (capped) provisioning output and show only a failure.
+  xcodebuild -downloadPlatform iOS -buildVersion "$v" > "$dl_log" 2>&1 \
+    || { tail -20 "$dl_log" >&2; die "iOS $v runtime download failed"; }
+done
+rm -f "$dl_log"
+# id<TAB>version of every available iOS runtime, newest first
+runtimes="$(xcrun simctl list runtimes -j | /usr/bin/python3 -I -c '
+import json, sys
+r = [x for x in json.load(sys.stdin)["runtimes"] if x.get("isAvailable") and x.get("platform") == "iOS"]
+r.sort(key=lambda x: [int(p) for p in x["version"].split(".")], reverse=True)
+for x in r: print(x["identifier"] + "\t" + x["version"])')"
+[ -n "$runtimes" ] || die "no iOS simulator runtime available"
+for v in $EXTRA_RUNTIMES; do
+  printf '%s\n' "$runtimes" | awk -F'\t' -v w="$v" '$2 == w || index($2, w ".") == 1 { f = 1 } END { exit !f }' \
+    || die "iOS $v runtime not available after download"
+done
+newest="$(printf '%s\n' "$runtimes" | head -1 | cut -f2)"
+xcrun simctl shutdown all > /dev/null 2>&1 || true
+xcrun simctl delete all >&2
+created=0
+while IFS="$(printf '\t')" read -r rt ver; do
+  short="${ver%.*}"; [[ "$ver" =~ ^[0-9]+\.[0-9]+ ]] && short="${BASH_REMATCH[0]}"
+  while IFS= read -r cls; do
+    made=""
+    IFS='|' read -r -a cands <<< "$cls"
+    for model in "${cands[@]}"; do
+      if [ "$ver" = "$newest" ]; then name="$model"; else name="$model (iOS $short)"; fi
+      if xcrun simctl create "$name" "$model" "$rt" > /dev/null 2>&1; then made="$name"; break; fi
+    done
+    if [ -n "$made" ]; then created=$((created + 1)); log "simulator: $made"
+    else log "simulator: no device type of class [${cls}] runs iOS $ver, skipped"; fi
+  done <<< "$SIM_CLASSES"
+done <<< "$runtimes"
+[ "$created" -ge 8 ] || die "only $created simulators created"
+log "simulators: $created on runtimes $(printf '%s\n' "$runtimes" | cut -f2 | tr '\n' ' ')"
 
 # 4. no sshd -----------------------------------------------------------------------------------------
 # WHY not `systemsetup -setremotelogin off`: it asks "Do you really want to turn remote login off?"

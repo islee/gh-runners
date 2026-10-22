@@ -10,7 +10,8 @@
 #                                           tarball (both required: nothing is trusted unpinned)
 #            IOS_GOLDEN (ghr-ios-golden), TART (/usr/local/bin/tart), IOS_BUILD_CPUS (4),
 #            IOS_BUILD_MEM_MB (8192), IOS_DISK_GB (unset = keep the base image's disk size),
-#            IOS_BUILD_BOOT_TIMEOUT (600), IOS_PROVISION_OUT_MAX (20000000 bytes of guest output)
+#            IOS_BUILD_BOOT_TIMEOUT (600), IOS_PROVISION_OUT_MAX (20000000 bytes of guest output),
+#            IOS_EXTRA_RUNTIMES ("18.6 16.4": older iOS simulator runtimes to add; "" = none)
 # Output contract: stdout is exactly one line on success:  GOLDEN-OK <runner-version> <xcode-version>
 # Everything else goes to stderr; any failure exits non-zero.
 #
@@ -41,6 +42,8 @@ BOOT_TIMEOUT="${IOS_BUILD_BOOT_TIMEOUT:-600}"
 BOOT_POLL="${IOS_BUILD_BOOT_POLL:-5}"
 # Upper bound on provisioning output, bytes (see the provisioning step).
 PROVISION_OUT_MAX="${IOS_PROVISION_OUT_MAX:-20000000}"
+# Older iOS simulator runtimes added to the golden (owner, 2026-10-22: 18.x + the app floor 16.4).
+EXTRA_RUNTIMES="${IOS_EXTRA_RUNTIMES-18.6 16.4}"
 
 log() { echo "[build-ios] $*" >&2; }
 die() { log "ERROR $*"; exit 1; }
@@ -56,6 +59,7 @@ BASE="${1:-}"
 [[ "$BUILD_CPUS" =~ ^[1-9][0-9]?$ ]] && [[ "$BUILD_MEM_MB" =~ ^[1-9][0-9]{3,5}$ ]] \
   && [[ "$PROVISION_OUT_MAX" =~ ^[1-9][0-9]{3,9}$ ]] && [[ "$BOOT_TIMEOUT" =~ ^[1-9][0-9]{0,4}$ ]] && [[ "$BOOT_POLL" =~ ^[1-9][0-9]?$ ]] \
   && [[ "${IOS_DISK_GB:-0}" =~ ^[0-9]{1,4}$ ]] || { echo "build-ios: bad IOS_BUILD_*/IOS_DISK_GB value" >&2; exit 2; }
+[[ "$EXTRA_RUNTIMES" =~ ^([0-9]{2}\.[0-9]{1,2}( |$))*$ ]] || { echo "build-ios: IOS_EXTRA_RUNTIMES must look like '18.6 16.4'" >&2; exit 2; }
 [ -f "$PROVISION" ] || die "missing images/ios/provision.sh next to this script"
 
 # vm_field NAME FIELD — print FIELD ("State", "Disk", "Size") of the local VM NAME; empty if absent.
@@ -137,8 +141,8 @@ log "provisioning"
 # runaway guest command cannot fill the host disk through our stderr (it did once: an interactive prompt
 # re-asked on EOF and produced 285 GB). Past the cap `head` exits, the writer dies of SIGPIPE and
 # pipefail fails the build. The captured output is replayed to stderr for the operator.
-out="$("$TART" exec "$BUILD_VM" /bin/bash -c 'set -o pipefail; /bin/bash /tmp/ghr-provision.sh "$1" "$2" 2>&1 | head -c "$3"' \
-  _ "$RUNNER_VERSION" "$RUNNER_SHA256" "$PROVISION_OUT_MAX" < /dev/null)" || { printf '%s\n' "${out:-}" | tail -40 >&2; die "provisioning failed"; }
+out="$("$TART" exec "$BUILD_VM" /bin/bash -c 'set -o pipefail; /bin/bash /tmp/ghr-provision.sh "$1" "$2" "$4" 2>&1 | head -c "$3"' \
+  _ "$RUNNER_VERSION" "$RUNNER_SHA256" "$PROVISION_OUT_MAX" "$EXTRA_RUNTIMES" < /dev/null)" || { printf '%s\n' "${out:-}" | tail -40 >&2; die "provisioning failed"; }
 printf '%s\n' "$out" >&2
 "$TART" exec "$BUILD_VM" /bin/rm -f /tmp/ghr-provision.sh < /dev/null > /dev/null 2>&1 || true
 line="$(printf '%s\n' "$out" | grep '^PROVISION-OK ' | tail -1 || true)"
@@ -166,6 +170,6 @@ if [ -n "$(vm_state "$PREV_VM")" ]; then
   "$TART" delete "$PREV_VM" < /dev/null >&2 || log "WARN could not delete the previous golden $PREV_VM"
 fi
 
-log "inputs: base=$BASE runner=$runner_version (sha256 $RUNNER_SHA256) xcode=$xcode_version golden=$GOLDEN"
+log "inputs: base=$BASE extra-runtimes=${EXTRA_RUNTIMES:-none} runner=$runner_version (sha256 $RUNNER_SHA256) xcode=$xcode_version golden=$GOLDEN"
 log "golden disk: $(vm_field "$GOLDEN" Disk || true) GB (size on disk: $(vm_field "$GOLDEN" Size || true) GB)"
 printf 'GOLDEN-OK %s %s\n' "$runner_version" "$xcode_version"
