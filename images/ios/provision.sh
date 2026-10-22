@@ -6,6 +6,8 @@
 # runner VM needs on top of the pinned base image and removes the one inbound path the base ships:
 #   1. actions/runner (osx-arm64) into ~/actions-runner, sha256-verified. The slot starts it with
 #      `cd ~/actions-runner && ./run.sh --jitconfig <stdin>`; no config.sh, no stored credentials.
+#   1b. rbenv global = newest installed Ruby 3.x (CocoaPods breaks on the image's Ruby 4 default), with the
+#      image's cocoapods/fastlane versions installed for it.
 #   2. /Applications/Xcode_<version>.app symlink to the image's selected Xcode, so workflows that pin
 #      that path (xcode-select / DEVELOPER_DIR) find it whatever the base image calls its copy.
 #   3. Xcode first-launch tasks and licence, so the first job does not spend minutes on them.
@@ -43,6 +45,30 @@ mkdir -p "$RUNNER_DIR"
 tar xzf "$TARBALL" -C "$RUNNER_DIR"
 rm -f "$TARBALL"
 [ -x "$RUNNER_DIR/run.sh" ] || die "run.sh missing after extraction"
+
+# 1b. Ruby for CocoaPods -----------------------------------------------------------------------------
+# WHY: the base image's rbenv default is Ruby 4.x, whose json 3.x dropped `quirks_mode`; CocoaPods 1.17
+# still passes it, so every `pod install` dies with "ArgumentError - unknown keyword: quirks_mode"
+# (first live iOS build, 2026-10-22). Hosted macOS runners ship Ruby 3.x. Make the newest installed
+# 3.x the global and give it the same cocoapods/fastlane versions the image installed for the old default.
+RBENV="$(PATH=/opt/homebrew/bin:$HOME/.rbenv/bin:$PATH command -v rbenv || true)"
+[ -n "$RBENV" ] || die "rbenv not found in the base image"
+old_ruby="$("$RBENV" global)"
+ruby3="$("$RBENV" versions --bare | grep -E '^3\.[0-9]+\.[0-9]+$' | sort -t. -k1,1n -k2,2n -k3,3n | tail -1 || true)"
+[ -n "$ruby3" ] || die "no Ruby 3.x installed under rbenv (have: $("$RBENV" versions --bare | tr '\n' ' '))"
+for g in cocoapods fastlane; do
+  v="$(RBENV_VERSION=$old_ruby "$RBENV" exec gem list -e "$g" 2> /dev/null | sed -n "s/^$g (\([0-9.]*\).*/\1/p")"
+  [ -n "$v" ] || die "base image has no $g under Ruby $old_ruby to copy the version from"
+  if ! RBENV_VERSION=$ruby3 "$RBENV" exec gem list -i -e "$g" -v "$v" > /dev/null 2>&1; then
+    log "installing $g $v for Ruby $ruby3"
+    RBENV_VERSION=$ruby3 "$RBENV" exec gem install "$g" -v "$v" --no-document >&2 || die "gem install $g $v failed"
+  fi
+done
+"$RBENV" global "$ruby3"
+"$RBENV" rehash
+pod_version="$("$RBENV" exec pod --version 2> /dev/null || true)"
+[[ "$pod_version" =~ ^[0-9]+\.[0-9]+ ]] || die "pod does not run under Ruby $ruby3"
+log "ruby $old_ruby -> $ruby3 (cocoapods $pod_version)"
 
 # 2/3. Xcode -----------------------------------------------------------------------------------------
 sudo xcodebuild -license accept >&2 || log "WARN xcodebuild -license accept failed"
