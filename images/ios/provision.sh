@@ -62,10 +62,10 @@ xcodebuild -version >&2
 xcrun simctl list runtimes >&2 || log "WARN simctl list runtimes failed"
 
 # 4. no sshd -----------------------------------------------------------------------------------------
-# NOTE: `systemsetup` needs Full Disk Access on recent macOS and may refuse; disabling the launchd
-# service is the fallback that does not.
-sudo systemsetup -setremotelogin off >&2 2>&1 \
-  || { log "systemsetup refused; disabling the sshd launchd service instead"; sudo launchctl disable system/com.openssh.sshd >&2; }
+# WHY not `systemsetup -setremotelogin off`: it asks "Do you really want to turn remote login off?"
+# and, with stdin at EOF, re-asks forever; on the first live build that loop wrote 285 GB of prompts
+# to the host's build log and filled the host disk (2026-10-22). launchctl never prompts.
+sudo launchctl disable system/com.openssh.sshd >&2
 sudo launchctl bootout system/com.openssh.sshd >&2 2>&1 || true
 if /usr/bin/nc -z -G 2 127.0.0.1 22 > /dev/null 2>&1; then die "sshd still listens on port 22"; fi
 

@@ -43,7 +43,7 @@ line_of() { grep -n -F -e "$1" "$TART_LOG" | head -1 | cut -d: -f1; }
   s=$(line_of 'set ghr-ios-build --cpu 4 --memory 8192')
   r=$(line_of 'run ghr-ios-build --no-graphics --no-audio')
   a=$(line_of 'exec ghr-ios-build /usr/bin/true')
-  p=$(line_of "exec ghr-ios-build /bin/bash /tmp/ghr-provision.sh 2.999.0 $RSHA")
+  p=$(line_of "exec ghr-ios-build /bin/bash -c set -o pipefail; /bin/bash /tmp/ghr-provision.sh \"\$1\" \"\$2\" 2>&1 | head -c \"\$3\" _ 2.999.0 $RSHA 20000000")
   x=$(line_of 'stop ghr-ios-build')
   m=$(line_of 'rename ghr-ios-build ghr-ios-golden')
   [ -n "$c" ] && [ -n "$s" ] && [ -n "$r" ] && [ -n "$a" ] && [ -n "$p" ] && [ -n "$x" ] && [ -n "$m" ]
@@ -131,4 +131,14 @@ line_of() { grep -n -F -e "$1" "$TART_LOG" | head -1 | cut -d: -f1; }
   [ "$status" -eq 0 ]
   grep -q '^set ghr-ios-build --disk-size 120' "$TART_LOG"
   [ -e "$TARTSTATE/vms/ghr-ios-other" ]
+}
+
+@test "provisioning output is capped inside the guest; a capped (SIGPIPE) run fails the build and keeps the old golden" {
+  # 141 = the runaway writer killed by SIGPIPE once head -c stopped reading (pipefail surfaces it)
+  IOS_PROVISION_OUT_MAX=4096 FAKE_PROVISION_RC=141 run bash "$BUILD" "$BASE"
+  [ "$status" -ne 0 ]
+  grep -q 'head -c "\$3" _ 2.999.0 [0-9a-f]* 4096$' "$TART_LOG"
+  refute grep -q '^GOLDEN-OK' <<< "$output"
+  IOS_PROVISION_OUT_MAX=12 run bash "$BUILD" "$BASE"
+  [ "$status" -eq 2 ]
 }

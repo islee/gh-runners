@@ -104,6 +104,9 @@ IS reachable when unfiltered, plus the vmnet gateway's sshd (`192.168.64.1:22`).
    that symlink only when the path does not exist.
 8. The runner is started in a login shell (`bash -lc`): rbenv shims (pod, fastlane), node, pnpm, openjdk
    and xcbeautify are on PATH only there. `nc -w` misreports on this guest, so every probe uses `-G` only.
-9. `provision.sh` is exercised only by shellcheck in CI (it needs a macOS guest). Disabling Remote Login
-   tries `systemsetup`, which can require Full Disk Access, and falls back to disabling the sshd launchd
-   service; the script fails the build if port 22 still answers in the guest.
+9. `provision.sh` is exercised only by shellcheck in CI (it needs a macOS guest). Remote Login is turned off
+   with `launchctl disable`/`bootout`, never `systemsetup -setremotelogin off`: that prompts, and on EOF
+   re-prompts forever. On the first live build the loop wrote a 285 GB log and filled the host disk, which
+   took the whole pool down for ~12 min. The script fails the build if port 22 still answers in the guest.
+10. Provisioning output is capped inside the guest (`IOS_PROVISION_OUT_MAX`, default 20 MB) for the same
+   reason; past the cap the build fails instead of writing on.

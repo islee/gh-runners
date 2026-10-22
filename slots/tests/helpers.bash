@@ -334,7 +334,8 @@ case "$cmd" in
         [ -z "${FAKE_PROBE_EXEC_RC:-}" ] || exit "$FAKE_PROBE_EXEC_RC"
         echo "GHR_NC_RC=${FAKE_PROBE_RC:-1}"; exit 0 ;;
       *"run.sh"*) sleep "${FAKE_RUN_SLEEP:-0}"; exit "${FAKE_RUN_RC:-0}" ;;
-      "/bin/bash /tmp/ghr-provision.sh"*)
+      # build-ios.sh runs provisioning as: bash -c '<pipefail> provision.sh "$1" "$2" 2>&1 | head -c "$3"' _ V SHA MAX
+      *"/tmp/ghr-provision.sh"*"head -c"*)
         [ "${FAKE_PROVISION_RC:-0}" -eq 0 ] || exit "$FAKE_PROVISION_RC"
         printf '%s\n' "${FAKE_PROVISION_OUT-PROVISION-OK 2.999.0 26.0}"; exit 0 ;;
       *) exit 0 ;;

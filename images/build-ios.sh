@@ -10,7 +10,7 @@
 #                                           tarball (both required: nothing is trusted unpinned)
 #            IOS_GOLDEN (ghr-ios-golden), TART (/usr/local/bin/tart), IOS_BUILD_CPUS (4),
 #            IOS_BUILD_MEM_MB (8192), IOS_DISK_GB (unset = keep the base image's disk size),
-#            IOS_BUILD_BOOT_TIMEOUT (600)
+#            IOS_BUILD_BOOT_TIMEOUT (600), IOS_PROVISION_OUT_MAX (20000000 bytes of guest output)
 # Output contract: stdout is exactly one line on success:  GOLDEN-OK <runner-version> <xcode-version>
 # Everything else goes to stderr; any failure exits non-zero.
 #
@@ -39,6 +39,8 @@ BUILD_CPUS="${IOS_BUILD_CPUS:-4}"
 BUILD_MEM_MB="${IOS_BUILD_MEM_MB:-8192}"
 BOOT_TIMEOUT="${IOS_BUILD_BOOT_TIMEOUT:-600}"
 BOOT_POLL="${IOS_BUILD_BOOT_POLL:-5}"
+# Upper bound on provisioning output, bytes (see the provisioning step).
+PROVISION_OUT_MAX="${IOS_PROVISION_OUT_MAX:-20000000}"
 
 log() { echo "[build-ios] $*" >&2; }
 die() { log "ERROR $*"; exit 1; }
@@ -52,7 +54,7 @@ BASE="${1:-}"
 [[ "${RUNNER_SHA256:-}" =~ ^[0-9a-f]{64}$ ]] || { echo "build-ios: RUNNER_SHA256 (64 hex, of the osx-arm64 tarball) is required" >&2; exit 2; }
 [[ "$GOLDEN" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] && ! [[ "$GOLDEN" =~ ^ghr-ios-[0-9]+$ ]] || { echo "build-ios: bad IOS_GOLDEN" >&2; exit 2; }
 [[ "$BUILD_CPUS" =~ ^[1-9][0-9]?$ ]] && [[ "$BUILD_MEM_MB" =~ ^[1-9][0-9]{3,5}$ ]] \
-  && [[ "$BOOT_TIMEOUT" =~ ^[1-9][0-9]{0,4}$ ]] && [[ "$BOOT_POLL" =~ ^[1-9][0-9]?$ ]] \
+  && [[ "$PROVISION_OUT_MAX" =~ ^[1-9][0-9]{3,9}$ ]] && [[ "$BOOT_TIMEOUT" =~ ^[1-9][0-9]{0,4}$ ]] && [[ "$BOOT_POLL" =~ ^[1-9][0-9]?$ ]] \
   && [[ "${IOS_DISK_GB:-0}" =~ ^[0-9]{1,4}$ ]] || { echo "build-ios: bad IOS_BUILD_*/IOS_DISK_GB value" >&2; exit 2; }
 [ -f "$PROVISION" ] || die "missing images/ios/provision.sh next to this script"
 
@@ -131,7 +133,13 @@ log "provisioning"
 # CRITICAL: the script is streamed to a FILE in the guest first and then run with stdin at /dev/null,
 # so a child that reads stdin (installers, sudo prompts) cannot swallow the rest of it.
 "$TART" exec -i "$BUILD_VM" /bin/bash -c 'cat > /tmp/ghr-provision.sh' < "$PROVISION" || die "cannot copy provision.sh into $BUILD_VM"
-out="$("$TART" exec "$BUILD_VM" /bin/bash /tmp/ghr-provision.sh "$RUNNER_VERSION" "$RUNNER_SHA256" < /dev/null)" || die "provisioning failed"
+# CRITICAL: provisioning output is capped INSIDE the guest (stdout+stderr, PROVISION_OUT_MAX bytes) so a
+# runaway guest command cannot fill the host disk through our stderr (it did once: an interactive prompt
+# re-asked on EOF and produced 285 GB). Past the cap `head` exits, the writer dies of SIGPIPE and
+# pipefail fails the build. The captured output is replayed to stderr for the operator.
+out="$("$TART" exec "$BUILD_VM" /bin/bash -c 'set -o pipefail; /bin/bash /tmp/ghr-provision.sh "$1" "$2" 2>&1 | head -c "$3"' \
+  _ "$RUNNER_VERSION" "$RUNNER_SHA256" "$PROVISION_OUT_MAX" < /dev/null)" || { printf '%s\n' "${out:-}" | tail -40 >&2; die "provisioning failed"; }
+printf '%s\n' "$out" >&2
 "$TART" exec "$BUILD_VM" /bin/rm -f /tmp/ghr-provision.sh < /dev/null > /dev/null 2>&1 || true
 line="$(printf '%s\n' "$out" | grep '^PROVISION-OK ' | tail -1 || true)"
 [[ "$line" =~ ^PROVISION-OK\ ([0-9]+\.[0-9]+\.[0-9]+)\ ([0-9][0-9.]*)$ ]] || die "provisioning did not report PROVISION-OK"
