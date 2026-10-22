@@ -697,6 +697,27 @@ queued_job() { printf '{"id":%s,"status":"%s","labels":%s}' "$1" "$2" "$3"; }
   [ "$(grep -c 'event=workflow_dispatch' "$CURL_ARGV_LOG")" -eq 2 ]
 }
 
+@test "demand probe: IOS_DEMAND_EVENTS lists every event (comma or space) -- 2 list calls each, runs counted once" {
+  probe_setup
+  IOS_DEMAND_EVENTS="workflow_dispatch,pull_request"
+  route GET /repos/test-org/repo-a/actions/runs/101/jobs 200 "{\"jobs\":[$(queued_job 1 queued '["ghr-ios"]')]}"
+  route GET /repos/test-org/repo-a/actions/runs/102/jobs 200 '{"jobs":[]}'
+  probe_ios_demand 77
+  [ "$(cat "$GHR_DEMAND_DIR/ios")" = "77 1" ]
+  [ "$(grep -c 'event=workflow_dispatch' "$CURL_ARGV_LOG")" -eq 2 ]
+  [ "$(grep -c 'event=pull_request' "$CURL_ARGV_LOG")" -eq 2 ]
+}
+
+@test "demand probe: an invalid IOS_DEMAND_EVENTS entry is an ERROR and nothing is queried or written" {
+  probe_setup
+  echo "1111 3" > "$GHR_DEMAND_DIR/ios"
+  IOS_DEMAND_EVENTS="workflow_dispatch pull_request&x=1"
+  run probe_ios_demand 9
+  [[ "$output" == *"ERROR invalid IOS_DEMAND_EVENTS entry"* ]]
+  refute grep -q 'actions/runs' "$CURL_ARGV_LOG"
+  [ "$(cat "$GHR_DEMAND_DIR/ios")" = "1111 3" ]
+}
+
 @test "demand probe: it is time-boxed (PROBE_BUDGET_SECS) -- over budget counts as a failure and leaves the file alone" {
   probe_setup
   echo "1111 3" > "$GHR_DEMAND_DIR/ios"

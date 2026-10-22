@@ -24,7 +24,8 @@
 # a macOS VM needs 1-2 min to boot before its runner is online, plus the 60 s heartbeat marks. The ios states dormant,
 # waiting-capacity and yielded are healthy.)
 # ios demand probe: the ONE place that reads the job queue. With IOS_DEMAND_REPOS set (and
-# IOS_SLOTS=1) each run looks at the queued + in_progress runs of those repos for a queued job whose
+# IOS_SLOTS=1) each run looks at the queued + in_progress runs (triggered by one of IOS_DEMAND_EVENTS,
+# default workflow_dispatch) of those repos for a queued job whose
 # labels equal IOS_LABELS and writes `<epoch> <count>` to $GHR_DEMAND_DIR/ios (removed when none).
 # The ios slot loop (slot-loop.sh) wakes on that file; it never feeds the published state. Needs the
 # State App's repo permission "Actions: read". An API failure leaves the file untouched (it ages
@@ -303,13 +304,16 @@ probe_time_left() { [ "$(date -u +%s)" -lt "${PROBE_DEADLINE:-0}" ]; }
 # NOTE: a run whose earlier jobs are running is `in_progress` while its ios job is still `queued`,
 # so both run statuses are scanned; the jobs list is the per-run truth.
 ios_repo_demand() {
-  local repo=$1 want=$2 st page id ids="" total=0 jobs c
-  # NOTE: event=workflow_dispatch -- ios workflows are dispatch-only (config.example.env), which keeps
-  # the run lists short; a push/PR-triggered ios job would never wake the slot.
-  for st in queued in_progress; do
-    probe_time_left || return 1
-    page=$(gh_api GET "/repos/${repo}/actions/runs?status=${st}&event=workflow_dispatch&per_page=20") || return 1
-    ids="$ids $(printf '%s' "$page" | run_ids_from_json)" || return 1
+  local repo=$1 want=$2 ev st page id ids="" total=0 jobs c
+  # NOTE: the run lists are filtered by trigger event (IOS_DEMAND_EVENTS) to keep them short: ios
+  # workflows are dispatch- or label-triggered, so an ios job from any other event never wakes the slot.
+  # Each event costs 2 list calls per repo per heartbeat.
+  for ev in ${IOS_DEMAND_EVENTS:-workflow_dispatch}; do
+    for st in queued in_progress; do
+      probe_time_left || return 1
+      page=$(gh_api GET "/repos/${repo}/actions/runs?status=${st}&event=${ev}&per_page=20") || return 1
+      ids="$ids $(printf '%s' "$page" | run_ids_from_json)" || return 1
+    done
   done
   # a run can move between the two listings; count it once
   for id in $(printf '%s\n' $ids | sort -u); do
@@ -335,6 +339,12 @@ probe_ios_demand() {
   # shellcheck disable=SC2034
   local GH_MAX_TIME=10
   want=$(norm_labels "${IOS_LABELS:-ghr-ios}")
+  # The event names end up in a URL query: only GitHub's lowercase event-name charset is accepted.
+  local ev evs="${IOS_DEMAND_EVENTS:-workflow_dispatch}"
+  for ev in ${evs//,/ }; do
+    [[ "$ev" =~ ^[a-z_]{1,40}$ ]] || { ghr_log "ERROR invalid IOS_DEMAND_EVENTS entry '$ev': ios demand not probed"; return 0; }
+  done
+  IOS_DEMAND_EVENTS=${evs//,/ }
   for repo in ${IOS_DEMAND_REPOS//,/ }; do
     [[ "$repo" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] || { ghr_log "WARN skipping invalid IOS_DEMAND_REPOS entry: $repo"; continue; }
     if c=$(ios_repo_demand "$repo" "$want"); then
