@@ -677,7 +677,7 @@ queued_job() { printf '{"id":%s,"status":"%s","labels":%s}' "$1" "$2" "$3"; }
   grep -q 'filter=latest' "$CURL_ARGV_LOG"
   # world-readable (the controller account reads it), no leftover tmp
   [ "$(ls -A "$GHR_DEMAND_DIR")" = "ios" ]
-  [ "$(stat -f %Lp "$GHR_DEMAND_DIR/ios" 2> /dev/null || stat -c %a "$GHR_DEMAND_DIR/ios")" = "644" ]
+  [ "$(stat -c %a "$GHR_DEMAND_DIR/ios" 2> /dev/null || stat -f %Lp "$GHR_DEMAND_DIR/ios")" = "644" ]
 }
 
 @test "demand probe: only a QUEUED job whose labels include all of IOS_LABELS and nothing else (bar self-hosted) counts" {
