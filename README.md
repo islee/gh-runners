@@ -25,8 +25,9 @@ tied to one organization.
    other moving part.
 2. **The pool** ([`slots/`](slots/)) runs one launchd loop per slot. Each loop mints a JIT runner
    config through a GitHub App and starts one job, either in a container inside a long-lived Lima VM
-   (`light` class) or in a per-job Lima VM cloned from a golden image (`supabase` class). A heartbeat
-   daemon publishes the pool's state to every consumer repo.
+   (`light` class), in a per-job Lima VM cloned from a golden image (`supabase` class), or in a
+   per-job Tart macOS VM (`ios` class, dormant until an iOS job is queued; the supabase slots make
+   room for it). A heartbeat daemon publishes the pool's state to every consumer repo.
 3. **The rescuer** ([`rescuer/`](rescuer/)) runs on a different always-on host. It catches the one
    case routing can't: the pool dies *after* a job was routed to it. It cancels and re-runs such
    runs so the `pick` job sends them to hosted runners.
@@ -36,7 +37,7 @@ tied to one organization.
 ```
 gh-runners/
 ├── slots/        # macOS host: JIT slot loops, Lima pool, heartbeat, installer; Proxmox slot (+ tests/, bats)
-├── images/       # runner images: light (container, hosted-parity tool cache) and supabase (Lima / Proxmox golden VM)
+├── images/       # runner images: light (container, hosted-parity tool cache), supabase (Lima / Proxmox golden VM), ios (Tart macOS golden VM)
 ├── rescuer/      # off-pool container: cancels + re-runs jobs stranded on pool labels, plus the usage ledger (+ tests/, pytest)
 ├── requirements-dev.txt   # gate deps (pytest, ruff)
 ├── .pre-commit-config.yaml  .hadolint.yaml  .github/   # gate = CI (same hooks)
@@ -62,7 +63,7 @@ Three GitHub Apps, each with one narrow job, so no host holds a broad credential
 | App role | Permissions | Held by | Used for |
 |---|---|---|---|
 | runner | org self-hosted runners: write | pool host, controller account | minting JIT runner configs, removing stale runners |
-| state | Actions variables: write; org self-hosted runners: read | pool host, heartbeat account | writing `SELF_HOSTED_STATE`, the foreign-runner tripwire |
+| state | Actions variables: write; org self-hosted runners: read; (optional) Actions: read | pool host, heartbeat account | writing `SELF_HOSTED_STATE`, the foreign-runner tripwire, the ios demand probe |
 | rescuer | Actions: write | off-pool host (+ optional hosted backstop secret) | cancelling and re-running stranded runs |
 
 The two keys on the pool host belong to separate role accounts. Jobs run as a third account, inside

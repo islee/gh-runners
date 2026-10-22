@@ -159,3 +159,16 @@ tsv_fixture() {
   [ "$status" -eq 10 ]
   refute grep -q 'CALL DELETE' "$CURL_LOG"
 }
+
+@test "ios class: ghr-ios-1 with ghr-ios mints only when ghr-ios is allow-listed (and never with hosted labels)" {
+  ALLOWED_LABELS="ghr-light,ghr-supabase"
+  run jit_validate ghr-ios-1 ghr-ios
+  [ "$status" -ne 0 ]
+  ALLOWED_LABELS="ghr-light,ghr-supabase,ghr-ios"
+  run jit_validate ghr-ios-1 ghr-ios
+  [ "$status" -eq 0 ]
+  run jit_validate ghr-ios-1 macos-latest
+  [ "$status" -ne 0 ]
+  run jit_validate ghr-ios-2x ghr-ios
+  [ "$status" -ne 0 ]
+}

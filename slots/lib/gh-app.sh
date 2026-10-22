@@ -23,13 +23,13 @@ GH_TOKEN_TTL="${GH_TOKEN_TTL:-3000}"
 
 # Runner naming convention. CRITICAL: anchored. Also checked against embedded newlines in
 # ghr_valid_runner_name because a bare `$` would accept "ghr-light-1\n" in some regex engines.
-GHR_NAME_RE='^ghr-(light|supabase)-[0-9]+$'
+GHR_NAME_RE='^ghr-(light|supabase|ios)-[0-9]+$'
 
 ghr_log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*" >&2; }
 
 # ── Config ──────────────────────────────────────────────────────────────────────
 
-# ghr_valid_runner_name NAME — exit 0 iff NAME is exactly ghr-(light|supabase)-<digits>.
+# ghr_valid_runner_name NAME — exit 0 iff NAME is exactly ghr-(light|supabase|ios)-<digits>.
 ghr_valid_runner_name() {
   case "$1" in *$'\n'*|*$'\r'*) return 1 ;; esac
   [[ "$1" =~ $GHR_NAME_RE ]]
@@ -55,6 +55,15 @@ ghr_load_config() {
   : "${SUPA_MEM:=4GiB}"
   : "${SUPA_CPUS:=4}"
   : "${REMOTE_SLOTS:=}"
+  # ios class (Tart macOS VM per job, dormant until a job is queued; see slot-loop.sh / launch.sh).
+  # IOS_SLOTS is 0|1 (hard max 1). IOS_SUPA_KEEP = how many supabase slots may stay up while the
+  # iOS VM runs; the others yield. Sizing/golden/runner-dir defaults are validated in launch.sh.
+  : "${IOS_SLOTS:=0}"
+  : "${IOS_LABELS:=ghr-ios}"
+  : "${IOS_SUPA_KEEP:=1}"
+  : "${IOS_DEMAND_REPOS:=}"
+  : "${IOS_STUCK_SECS:=600}"
+  : "${IOS_LAN_PROBES:=}"
   : "${PVE_SLOTS:=}"
   : "${ORG:=}"
   [[ "$ORG" =~ ^[A-Za-z0-9][A-Za-z0-9-]*$ ]] || { ghr_log "ERROR ORG missing/invalid in config"; return 1; }
@@ -160,7 +169,7 @@ _gh_request_inner() {
   trap 'exit 130' INT
   # mktemp -d is 0700, so the files below are private to this user.
   printf 'header = "Authorization: Bearer %s"\n' "$bearer" > "$tmp/cfg"
-  local args=(-sS --max-time 30 -X "$method" -K "$tmp/cfg"
+  local args=(-sS --max-time "${GH_MAX_TIME:-30}" -X "$method" -K "$tmp/cfg"
     -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28'
     -o "$tmp/out" -w '%{http_code}')
   if [ -n "$json" ]; then

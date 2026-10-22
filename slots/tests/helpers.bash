@@ -258,3 +258,107 @@ SHIM
   chmod +x "$FAKE_BIN/qm"
   export QM="$FAKE_BIN/qm"
 }
+
+# tart_setup — stateful `tart` shim for the ios suites (launch-ios, build-ios). Per-VM state lives in
+# $TARTSTATE/vms/<name> (one word: stopped|running|suspended); the golden `ghr-ios-golden` is created
+# `stopped` unless FAKE_TART_GOLDEN_STATE says otherwise ("none" = absent). Every call is logged to
+# $TART_LOG (argv) and its environment to $TART_ENV; the stdin of the runner start (`exec -i ... run.sh`)
+# lands in $TART_STDIN, the stdin of every OTHER call in $TART_OTHER_STDIN (must stay empty). `list
+# --format json` prints the expected array shape (Source/Name/State/Running/Disk/Size) incl. an OCI entry.
+# Knobs (env): FAKE_TART_LIST_RC/_JSON (override), FAKE_CLONE_RC/_SLEEP, FAKE_SET_RC, FAKE_RUN_DIES
+# (`tart run` exits 1 at once), FAKE_AGENT_FAILS=N (first N `exec ... true` fail), FAKE_AGENT_NEVER,
+# FAKE_PROBE_RC (nc, default 1 = blocked), FAKE_RUN_RC/_SLEEP (the runner), FAKE_STOP_RC/_SLEEP,
+# FAKE_DELETE_RC, FAKE_DELETE_PERSIST, FAKE_PROVISION_OUT/_RC (build suite), FAKE_RENAME_RC/_FAIL_TO (the first rename TO that name fails),
+# FAKE_ALL_VMS (extra "name state" lines created at setup).
+tart_setup() {
+  TART_LOG="$W/tart.log"; TART_ENV="$W/tart.env"; TART_STDIN="$W/tart.stdin"; TART_OTHER_STDIN="$W/tart.other.stdin"
+  TARTSTATE="$W/tartstate"
+  mkdir -p "$TARTSTATE/vms"
+  : > "$TART_LOG"; : > "$TART_ENV"; : > "$TART_OTHER_STDIN"
+  case "${FAKE_TART_GOLDEN_STATE-stopped}" in none) ;; *) echo "${FAKE_TART_GOLDEN_STATE-stopped}" > "$TARTSTATE/vms/ghr-ios-golden" ;; esac
+  if [ -n "${FAKE_ALL_VMS:-}" ]; then
+    while read -r nm st; do [ -z "$nm" ] || echo "$st" > "$TARTSTATE/vms/$nm"; done <<< "$FAKE_ALL_VMS"
+  fi
+  export TART_LOG TART_ENV TART_STDIN TART_OTHER_STDIN TARTSTATE
+  cat > "$FAKE_BIN/tart" <<'SHIM'
+#!/bin/bash
+echo "$*" >> "$TART_LOG"
+env >> "$TART_ENV"
+cmd=$1
+case "$*" in
+  *"exec -i"*"run.sh"*) cat > "$TART_STDIN" ;;
+  *) cat >> "$TART_OTHER_STDIN" ;;
+esac
+vmf() { echo "$TARTSTATE/vms/$1"; }
+case "$cmd" in
+  list)
+    [ "${FAKE_TART_LIST_RC:-0}" -eq 0 ] || exit "$FAKE_TART_LIST_RC"
+    if [ -n "${FAKE_TART_LIST_JSON:-}" ]; then printf '%s\n' "$FAKE_TART_LIST_JSON"; exit 0; fi
+    printf '[\n'
+    printf '{"Source":"OCI","Name":"ghcr.io/example/base@sha256:abc","Disk":50,"Size":20,"Running":false,"State":"stopped"}'
+    for f in "$TARTSTATE"/vms/*; do
+      [ -e "$f" ] || continue
+      st=$(cat "$f")
+      running=false; [ "$st" = running ] && running=true
+      printf ',\n{"Source":"local","Name":"%s","Disk":50,"Size":20,"Running":%s,"State":"%s"}' "$(basename "$f")" "$running" "$st"
+    done
+    printf '\n]\n' ;;
+  clone)
+    sleep "${FAKE_CLONE_SLEEP:-0}"
+    echo stopped > "$(vmf "$3")"
+    exit "${FAKE_CLONE_RC:-0}" ;;
+  set) exit "${FAKE_SET_RC:-0}" ;;
+  run)
+    vm=$2
+    if [ -n "${FAKE_RUN_DIES:-}" ]; then echo stopped > "$(vmf "$vm")"; exit 1; fi
+    echo running > "$(vmf "$vm")"
+    # a killed `tart run` is a stopped VM (the real list derives the state from the process)
+    trap 'echo stopped > "$(vmf "$vm")" 2> /dev/null; exit 143' TERM
+    # blocks for the VM's lifetime: ends when the VM is stopped or deleted
+    while [ "$(cat "$(vmf "$vm")" 2> /dev/null)" = running ]; do sleep 0.2; done
+    exit 0 ;;
+  exec)
+    shift; [ "$1" != "-i" ] || shift
+    vm=$1; shift
+    # the guest agent only exists while the VM runs
+    [ "$(cat "$(vmf "$vm")" 2> /dev/null)" = running ] || exit 1
+    case "$*" in
+      "/usr/bin/true")
+        [ -z "${FAKE_AGENT_NEVER:-}" ] || exit 1
+        n=$(cat "$TARTSTATE/.agent.$vm" 2> /dev/null || echo 0)
+        echo $((n + 1)) > "$TARTSTATE/.agent.$vm"
+        [ "$n" -ge "${FAKE_AGENT_FAILS:-0}" ] || exit 1
+        exit 0 ;;
+      *"/usr/bin/nc "*)
+        # the probe prints the guest nc's exit code; FAKE_PROBE_EXEC_RC fails `tart exec` itself
+        [ -z "${FAKE_PROBE_EXEC_RC:-}" ] || exit "$FAKE_PROBE_EXEC_RC"
+        echo "GHR_NC_RC=${FAKE_PROBE_RC:-1}"; exit 0 ;;
+      *"run.sh"*) sleep "${FAKE_RUN_SLEEP:-0}"; exit "${FAKE_RUN_RC:-0}" ;;
+      # build-ios.sh runs provisioning as: bash -c '<pipefail> provision.sh "$1" "$2" 2>&1 | head -c "$3"' _ V SHA MAX
+      *"/tmp/ghr-provision.sh"*"head -c"*)
+        [ "${FAKE_PROVISION_RC:-0}" -eq 0 ] || exit "$FAKE_PROVISION_RC"
+        printf '%s\n' "${FAKE_PROVISION_OUT-PROVISION-OK 2.999.0 26.0}"; exit 0 ;;
+      *) exit 0 ;;
+    esac ;;
+  stop)
+    sleep "${FAKE_STOP_SLEEP:-0}"
+    [ "${FAKE_STOP_RC:-0}" -eq 0 ] || exit "$FAKE_STOP_RC"
+    [ ! -e "$(vmf "$2")" ] || echo stopped > "$(vmf "$2")"
+    exit 0 ;;
+  delete)
+    [ "${FAKE_DELETE_RC:-0}" -eq 0 ] || exit "$FAKE_DELETE_RC"
+    # like the real thing, a running VM cannot be deleted
+    [ "$(cat "$(vmf "$2")" 2> /dev/null)" != running ] || exit 1
+    [ -n "${FAKE_DELETE_PERSIST:-}" ] || rm -f "$(vmf "$2")"
+    exit 0 ;;
+  rename)
+    [ "${FAKE_RENAME_RC:-0}" -eq 0 ] || exit "$FAKE_RENAME_RC"
+    # fails ONCE (the restore after a failed swap renames to the same name and must work)
+    if [ "$3" = "${FAKE_RENAME_FAIL_TO:-}" ] && [ ! -e "$TARTSTATE/.rename-failed" ]; then : > "$TARTSTATE/.rename-failed"; exit 1; fi
+    mv "$(vmf "$2")" "$(vmf "$3")"; exit $? ;;
+  *) exit 0 ;;
+esac
+SHIM
+  chmod +x "$FAKE_BIN/tart"
+  export TART="$FAKE_BIN/tart"
+}

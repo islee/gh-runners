@@ -182,3 +182,11 @@ PY
 @test "install.sh installs reload-slot with the installed marker" {
   grep -q 'launch | pool | reload-slot)' "$SLOTS_DIR/install.sh"
 }
+
+@test "reload-slot accepts the ios slot label (and still bootstraps once the old loop is gone)" {
+  render_plist "$SLOTS_DIR/launchd/dev.ghr.slot.plist" "$W/ios.plist" CLASS=ios N=1 LIBEXEC="$LIBEXEC" CTL_HOME=/var/db/_ghrctl LOGDIR="$LOGDIR"
+  cp "$W/ios.plist" "$DAEMON_DIR/dev.ghr.slot.ios-1.plist"
+  rc=0; LAUNCHCTL="$FAKE_BIN/launchctl" GHR_DAEMON_DIR="$DAEMON_DIR" RELOAD_MAX_WAIT=3 RELOAD_POLL=1 bash "$SLOTS_DIR/reload-slot.sh" dev.ghr.slot.ios-1 "$DAEMON_DIR/dev.ghr.slot.ios-1.plist" 2> /dev/null || rc=$?
+  [ "$rc" -eq 0 ]
+  grep -q '^bootstrap system .*dev.ghr.slot.ios-1.plist' "$LCTL_LOG"
+}
