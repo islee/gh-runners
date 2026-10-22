@@ -329,7 +329,10 @@ case "$cmd" in
         echo $((n + 1)) > "$TARTSTATE/.agent.$vm"
         [ "$n" -ge "${FAKE_AGENT_FAILS:-0}" ] || exit 1
         exit 0 ;;
-      *"/usr/bin/nc "*) exit "${FAKE_PROBE_RC:-1}" ;;
+      *"/usr/bin/nc "*)
+        # the probe prints the guest nc's exit code; FAKE_PROBE_EXEC_RC fails `tart exec` itself
+        [ -z "${FAKE_PROBE_EXEC_RC:-}" ] || exit "$FAKE_PROBE_EXEC_RC"
+        echo "GHR_NC_RC=${FAKE_PROBE_RC:-1}"; exit 0 ;;
       *"run.sh"*) sleep "${FAKE_RUN_SLEEP:-0}"; exit "${FAKE_RUN_RC:-0}" ;;
       "/bin/bash /tmp/ghr-provision.sh"*)
         [ "${FAKE_PROVISION_RC:-0}" -eq 0 ] || exit "$FAKE_PROVISION_RC"

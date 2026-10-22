@@ -102,6 +102,8 @@ IS reachable when unfiltered, plus the vmnet gateway's sshd (`192.168.64.1:22`).
    release and that the in-guest preflight blocks, before trusting the class with real jobs.
 7. The Cirrus base images already carry Xcode at `/Applications/Xcode_<ver>.app`; `provision.sh` creates
    that symlink only when the path does not exist.
-8. `provision.sh` is exercised only by shellcheck in CI (it needs a macOS guest). Disabling Remote Login
+8. The runner is started in a login shell (`bash -lc`): rbenv shims (pod, fastlane), node, pnpm, openjdk
+   and xcbeautify are on PATH only there. `nc -w` misreports on this guest, so every probe uses `-G` only.
+9. `provision.sh` is exercised only by shellcheck in CI (it needs a macOS guest). Disabling Remote Login
    tries `systemsetup`, which can require Full Disk Access, and falls back to disabling the sshd launchd
    service; the script fails the build if port 22 still answers in the guest.

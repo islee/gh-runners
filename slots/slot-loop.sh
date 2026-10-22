@@ -58,6 +58,13 @@ IOS_YIELD_WAIT_SECS="${IOS_YIELD_WAIT_SECS:-3600}"
 FUTURE_SECS="${FUTURE_SECS:-5}"
 # After "busy" answers to a release attempt that is not a shutdown, wait this long before asking again.
 BUSY_REPROBE_SECS="${BUSY_REPROBE_SECS:-120}"
+# After a failed ios cycle the slot stays dormant (takes no lease) for IOS_COOLDOWN_BASE s, doubling per
+# consecutive failure up to IOS_COOLDOWN_MAX. WHY: backoff_wait does not refresh the lease, so without
+# this the supabase slots resume, the still-fresh demand makes ios retake the lease, and the pair thrash.
+IOS_COOLDOWN_BASE="${IOS_COOLDOWN_BASE:-900}"
+IOS_COOLDOWN_MAX="${IOS_COOLDOWN_MAX:-3600}"
+IOS_COOLDOWN=0
+IOS_COOLDOWN_UNTIL=0
 
 TERMINATING=0
 LAUNCH_PID=""
@@ -202,7 +209,7 @@ supa_gate() {
 # ios_gate — dormant until demand, then take the lease and wait for the supabase slots to yield.
 ios_gate() {
   local t0
-  while [ "$TERMINATING" -eq 0 ] && ! demand_fresh; do
+  while [ "$TERMINATING" -eq 0 ] && { ! demand_fresh || [ "$(date -u +%s)" -lt "$IOS_COOLDOWN_UNTIL" ]; }; do
     lease_remove
     write_state dormant
     nap
@@ -228,6 +235,16 @@ ios_gate() {
     nap
   done
   return 1
+}
+
+# ios_failed — a failed ios cycle: drop the lease NOW (supabase resumes) and go dormant for a
+# doubling cooldown even if the demand stays fresh.
+ios_failed() {
+  if [ "$IOS_COOLDOWN" -le 0 ]; then IOS_COOLDOWN=$IOS_COOLDOWN_BASE; else IOS_COOLDOWN=$((IOS_COOLDOWN * 2)); fi
+  [ "$IOS_COOLDOWN" -le "$IOS_COOLDOWN_MAX" ] || IOS_COOLDOWN=$IOS_COOLDOWN_MAX
+  IOS_COOLDOWN_UNTIL=$(( $(date -u +%s) + IOS_COOLDOWN ))
+  lease_remove
+  ghr_log "ios cycle failed: dormant for ${IOS_COOLDOWN}s"
 }
 
 # abort_reason — print why the minted-but-possibly-idle runner should be released now ("" = no
@@ -276,6 +293,7 @@ run_cycle() {
     do_release "$name" || ghr_log "WARN could not release $name"
     return 0
   fi
+  [ "$CLASS" != ios ] || lease_write
   write_state registered
   # Background so we can keep the state file fresh for the whole job (up to 6 h).
   do_launch &
@@ -289,13 +307,19 @@ run_cycle() {
       rc=0
       do_release "$name" || rc=$?
       if [ "$rc" -eq 0 ]; then
-        # NOTE: the sudo'd launch is root-owned and cannot be signalled from here; deleting the
-        # runner makes the in-container listener exit (or, while an ios/supabase VM is still
-        # booting, makes the runner fail to register once it starts), which ends launch.
         aborted=1
         ghr_log "released idle runner $name ($reason); abandoning launch"
-        kill -TERM "$LAUNCH_PID" 2> /dev/null
-        break
+        if [ "$TERMINATING" -eq 1 ]; then
+          # Shutdown: leave now (the sudo'd launch finishes on its own once the runner is gone).
+          kill -TERM "$LAUNCH_PID" 2> /dev/null
+          break
+        fi
+        # CRITICAL: for lease/demand reasons do NOT kill and do NOT leave. LAUNCH_PID is only the
+        # `do_launch &` subshell; the `printf | sudo launch` pipeline behind it survives a kill and
+        # still owns the VM. Deleting the runner makes launch fail and destroy its VM; we keep
+        # looping (and, for ios, keep refreshing the lease) until it has really exited, so neither
+        # `yielded` nor a freed lease can be published while that VM is alive.
+        write_state releasing
       fi
       ghr_log "runner $name busy (rc=$rc): letting the job finish"
       # A shutdown re-asks every tick (as before); other reasons back off so a long job does not
@@ -317,6 +341,7 @@ run_cycle() {
   LAST_EXIT=$rc
   write_state idle
   [ "$rc" -eq 0 ] || { ghr_log "launch exited $rc"; return 1; }
+  IOS_COOLDOWN=0
   return 0
 }
 
@@ -356,6 +381,7 @@ main() {
       backoff=0
     else
       backoff=$(next_backoff "$backoff")
+      [ "$CLASS" != ios ] || ios_failed
       write_state backoff
       ghr_log "backing off ${backoff}s"
       backoff_wait "$backoff"

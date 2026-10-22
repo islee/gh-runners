@@ -173,13 +173,20 @@ Operator clears a tripwire by deleting `/var/db/ghr/tripwire` after removing the
    one, so a vanished job cannot pin the lease; a busy runner is asked again only every
    `BUSY_REPROBE_SECS`. While yielded or waiting, those slots count as busy for saturation, so
    supabase/ios jobs spill to hosted runners instead of queueing; they are healthy states, and an ios
-   runner may be absent for `IOS_STUCK_SECS` (300) before the pool reads `down` (macOS boot).
+   runner may be absent for `IOS_STUCK_SECS` (600) before the pool reads `down` (macOS boot).
+   Releasing is never a kill: the `do_launch` subshell is not the process that owns the VM, so after
+   `reconcile --release` succeeds the loop keeps waiting (state `releasing`, lease still refreshed for
+   ios) until the launch has really exited; deleting the runner makes the launch fail and destroy its VM.
+   After a failed ios cycle the slot takes no lease for a cooldown (900 s, doubling, max 3600) so the
+   supabase slots are not starved by retry thrash. The demand probe runs after the state publish, within
+   a 20 s budget, and only sees `workflow_dispatch` runs (ios workflows must be dispatch-only); a job wakes
+   the slot when its labels include all of `IOS_LABELS` and nothing beyond them plus `self-hosted`.
 23. Tart egress: the guest sits on Virtualization.framework NAT (`bridge100`, 192.168.64.0/24,
    gateway/DNS 192.168.64.1). That traffic is forwarded by the kernel and is NOT a socket of user
    `ghr`, so the existing `user ghr` pf rules do not cover it; `images/ios/README.md` gives the extra
-   anchor rules. The in-guest preflight (`tart exec ... /usr/bin/nc -z -G 5 <host> <port>` for EVERY
-   `IOS_LAN_PROBES` entry, after a `/usr/bin/true` usability check) is the enforcement check: only nc
-   exit 1 counts as blocked, everything else refuses (exit 3). `LAN_PROBE` is not used for ios (a NAT
+   anchor rules. The in-guest preflight (`tart exec ... /bin/sh -c 'nc -z -G 5 ...; echo GHR_NC_RC=$?'` for
+   EVERY `IOS_LAN_PROBES` entry, after a `/usr/bin/true` usability check) is the enforcement check: only a
+   printed `GHR_NC_RC=1` counts as blocked (a `tart exec` transport error cannot pass as such), everything else refuses (exit 3). `LAN_PROBE` is not used for ios (a NAT
    guest cannot reach the host's own LAN address even unfiltered). Before `tart run`, `launch.sh`
    unlocks `ghr`'s login keychain (`security unlock-keychain` with the password on stdin; a macOS guest
    will not start otherwise); setup is an operator step in `images/ios/README.md`.

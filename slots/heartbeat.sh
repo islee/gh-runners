@@ -20,8 +20,8 @@
 # WHY repo-level variables: org variables don't reach private repos on GitHub Free.
 # WHY "stuck" uses GitHub runner status, not the job queue: the published state must not depend on
 # the queue. A slot sitting in idle-prep/registered/backoff for > STUCK_SECS whose runner is not
-# `online` on GitHub is wedged either way, and that is observable. (ios slots use IOS_STUCK_SECS:
-# a macOS VM needs 1-2 min to boot before its runner is online. The ios states dormant,
+# `online` on GitHub is wedged either way, and that is observable. (ios slots use IOS_STUCK_SECS (600):
+# a macOS VM needs 1-2 min to boot before its runner is online, plus the 60 s heartbeat marks. The ios states dormant,
 # waiting-capacity and yielded are healthy.)
 # ios demand probe: the ONE place that reads the job queue. With IOS_DEMAND_REPOS set (and
 # IOS_SLOTS=1) each run looks at the queued + in_progress runs of those repos for a queued job whose
@@ -134,9 +134,12 @@ compute_state() {
       # state, so `since`-based timing called a just-finished slot stuck (live false `down`, 2026-10-16).
       mark="$hb/notonline_$class-$n"
       stuck_secs=$STUCK_SECS
-      [ "$class" != ios ] || stuck_secs=${IOS_STUCK_SECS:-300}
+      [ "$class" != ios ] || stuck_secs=${IOS_STUCK_SECS:-600}
+      # `releasing` = the runner was deleted and the slot waits for its launch (and VM) to exit, which
+      # can take a boot time; only a launch stuck for IOS_STUCK_SECS is a wedge.
+      [ "$st" != releasing ] || stuck_secs=${IOS_STUCK_SECS:-600}
       case "$st" in
-        idle-prep | registered | backoff)
+        idle-prep | registered | backoff | releasing)
           if [ "$status" = "online" ]; then
             rm -f "$mark"
           else
@@ -149,7 +152,7 @@ compute_state() {
       esac
       # A slot that has handed its capacity to (or is waiting for) the ios VM serves nobody for now:
       # busy for saturation, whatever its runner says.
-      case "$class:$st" in supabase:yielded | ios:waiting-capacity) busy=true ;; esac
+      case "$class:$st" in supabase:yielded | supabase:releasing | ios:waiting-capacity | ios:releasing) busy=true ;; esac
       inc "total_$class"
       [ "$busy" != "true" ] || inc "busy_$class"
       n=$((n + 1))
@@ -273,24 +276,27 @@ for r in json.load(sys.stdin).get("workflow_runs", []):
 '
 }
 
-# jobs_queued_count WANT — run-jobs JSON on stdin -> number of jobs with status "queued" whose labels,
-# lowercased/sorted/unique/comma-joined (like norm_labels), equal WANT.
-# WHY exact equality: a job asking for ghr-ios plus another label could not run on a runner that
-# only carries ghr-ios, so it must not wake the slot.
+# jobs_queued_count WANT — run-jobs JSON on stdin -> number of jobs with status "queued" whose label
+# set contains every WANT label (comma list, as norm_labels prints) and nothing outside WANT plus
+# `self-hosted`. WHY: `runs-on: [self-hosted, ghr-ios]` is the usual spelling and must wake the slot,
+# but a job asking for some OTHER label as well could not run on a runner that only carries ours.
 jobs_queued_count() {
   python3 -I -c '
 import sys, json
-want = sys.argv[1]
+want = set(x for x in sys.argv[1].split(",") if x)
 n = 0
 for j in json.load(sys.stdin).get("jobs", []):
     if j.get("status") != "queued":
         continue
-    labels = ",".join(sorted({str(l).lower() for l in j.get("labels", []) if l}))
-    if labels == want:
+    labels = {str(l).lower() for l in j.get("labels", []) if l}
+    if want <= labels <= want | {"self-hosted"}:
         n += 1
 print(n)
 ' "$1"
 }
+
+# probe_time_left — 0 while the probe's overall deadline ($PROBE_DEADLINE, epoch) has not passed.
+probe_time_left() { [ "$(date -u +%s)" -lt "${PROBE_DEADLINE:-0}" ]; }
 
 # ios_repo_demand REPO WANT — print the number of queued ios jobs in REPO. Returns 1 on any API or
 # parse failure (the caller then leaves the demand file alone).
@@ -298,12 +304,16 @@ print(n)
 # so both run statuses are scanned; the jobs list is the per-run truth.
 ios_repo_demand() {
   local repo=$1 want=$2 st page id ids="" total=0 jobs c
+  # NOTE: event=workflow_dispatch -- ios workflows are dispatch-only (config.example.env), which keeps
+  # the run lists short; a push/PR-triggered ios job would never wake the slot.
   for st in queued in_progress; do
-    page=$(gh_api GET "/repos/${repo}/actions/runs?status=${st}&per_page=20") || return 1
+    probe_time_left || return 1
+    page=$(gh_api GET "/repos/${repo}/actions/runs?status=${st}&event=workflow_dispatch&per_page=20") || return 1
     ids="$ids $(printf '%s' "$page" | run_ids_from_json)" || return 1
   done
   # a run can move between the two listings; count it once
   for id in $(printf '%s\n' $ids | sort -u); do
+    probe_time_left || return 1
     jobs=$(gh_api GET "/repos/${repo}/actions/runs/${id}/jobs?filter=latest&per_page=100") || return 1
     c=$(printf '%s' "$jobs" | jobs_queued_count "$want") || return 1
     total=$((total + c))
@@ -315,6 +325,15 @@ ios_repo_demand() {
 probe_ios_demand() {
   local now=$1 repo want total=0 failed=0 c f="$GHR_DEMAND_DIR/ios"
   [ -n "${IOS_DEMAND_REPOS:-}" ] && [ "${IOS_SLOTS:-0}" -ge 1 ] || return 0
+  if ! [ -d "$GHR_DEMAND_DIR" ] || ! [ -w "$GHR_DEMAND_DIR" ]; then
+    ghr_log "ERROR ios demand dir $GHR_DEMAND_DIR is missing or not writable: the ios slot will never wake"
+    return 0
+  fi
+  # Overall budget: the probe runs after the state is published and must not stretch a heartbeat run.
+  PROBE_DEADLINE=$(( $(date -u +%s) + ${PROBE_BUDGET_SECS:-20} ))
+  # NOTE: read by _gh_request (lib/gh-app.sh) in its subshell: per-call curl cap for the probe.
+  # shellcheck disable=SC2034
+  local GH_MAX_TIME=10
   want=$(norm_labels "${IOS_LABELS:-ghr-ios}")
   for repo in ${IOS_DEMAND_REPOS//,/ }; do
     [[ "$repo" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] || { ghr_log "WARN skipping invalid IOS_DEMAND_REPOS entry: $repo"; continue; }
@@ -354,9 +373,7 @@ main() {
   local tmp now state rc=0 repo bad
   tmp=$(umask 077; mktemp "${TMPDIR:-/tmp}/ghr-hb.XXXXXX") || exit 1
   trap 'rm -f "$tmp"' EXIT
-  # Independent of the published state: before the runner listing so a listing failure cannot hide demand.
-  probe_ios_demand "$(date -u +%s)"
-  gh_list_runners > "$tmp" || { ghr_log "ERROR cannot list runners; not publishing"; exit 1; }
+  gh_list_runners > "$tmp" || { ghr_log "ERROR cannot list runners; not publishing"; probe_ios_demand "$(date -u +%s)"; exit 1; }
   now=$(date -u +%s)
   state=$(compute_state "$GHR_STATE_DIR" "$now" "$tmp" "$GHR_HB_ROOT/hb")
   ghr_log "state=$state"
@@ -372,6 +389,8 @@ main() {
     [[ "$repo" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] || { ghr_log "WARN skipping invalid repo: $repo"; rc=1; continue; }
     write_state_var "$repo" "${state%%/*}@${now}${state#"${state%%/*}"}" || { ghr_log "ERROR variable write failed: $repo"; rc=1; }
   done
+  # AFTER the publish loop and time-boxed: the probe never delays or blocks the published state.
+  probe_ios_demand "$(date -u +%s)"
   exit "$rc"
 }
 

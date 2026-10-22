@@ -62,7 +62,7 @@ ghr_load_config() {
   : "${IOS_LABELS:=ghr-ios}"
   : "${IOS_SUPA_KEEP:=1}"
   : "${IOS_DEMAND_REPOS:=}"
-  : "${IOS_STUCK_SECS:=300}"
+  : "${IOS_STUCK_SECS:=600}"
   : "${IOS_LAN_PROBES:=}"
   : "${PVE_SLOTS:=}"
   : "${ORG:=}"
@@ -169,7 +169,7 @@ _gh_request_inner() {
   trap 'exit 130' INT
   # mktemp -d is 0700, so the files below are private to this user.
   printf 'header = "Authorization: Bearer %s"\n' "$bearer" > "$tmp/cfg"
-  local args=(-sS --max-time 30 -X "$method" -K "$tmp/cfg"
+  local args=(-sS --max-time "${GH_MAX_TIME:-30}" -X "$method" -K "$tmp/cfg"
     -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28'
     -o "$tmp/out" -w '%{http_code}')
   if [ -n "$json" ]; then

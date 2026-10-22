@@ -15,7 +15,7 @@ setup() {
   # keychain: `security` is a shim that records argv + stdin; the password file stands in for ~ghr/.ghr/keychain.pass
   SEC_LOG="$W/security.log"; SEC_STDIN="$W/security.stdin"; : > "$SEC_LOG"
   export SEC_LOG SEC_STDIN SECURITY="$FAKE_BIN/security" TEST_IOS_KEYCHAIN="$W/login.keychain-db" TEST_IOS_KEYCHAIN_PASS="$W/keychain.pass"
-  printf 'KEYCHAIN-PW-0123456789\n' > "$W/keychain.pass"
+  printf 'KEYCHAIN-PW-0123456789\n' > "$W/keychain.pass"; chmod 0400 "$W/keychain.pass"
   cat > "$FAKE_BIN/security" <<'SHIM'
 #!/bin/bash
 echo "$*" >> "$SEC_LOG"
@@ -66,9 +66,9 @@ line_of() { grep -n -F -e "$1" "$TART_LOG" | head -1 | cut -d: -f1; }
   s=$(line_of 'set ghr-ios-1 --cpu 4 --memory 8192 --random-mac')
   r=$(line_of 'run ghr-ios-1 --no-graphics --no-audio')
   a=$(line_of 'exec ghr-ios-1 /usr/bin/true')
-  p=$(line_of 'exec ghr-ios-1 /usr/bin/nc -z -G 5 192.0.2.1 443')
-  p2=$(line_of 'exec ghr-ios-1 /usr/bin/nc -z -G 5 192.168.64.1 22')
-  j=$(line_of 'exec -i ghr-ios-1 /bin/bash -c')
+  p=$(line_of 'GHR_NC_RC=$? _ 192.0.2.1 443')
+  p2=$(line_of 'GHR_NC_RC=$? _ 192.168.64.1 22')
+  j=$(line_of 'exec -i ghr-ios-1 /bin/bash -lc')
   x=$(line_of 'stop ghr-ios-1')
   d=$(line_of 'delete ghr-ios-1')
   [ -n "$c" ] && [ -n "$s" ] && [ -n "$r" ] && [ -n "$a" ] && [ -n "$p" ] && [ -n "$p2" ] && [ -n "$j" ] && [ -n "$x" ] && [ -n "$d" ]
@@ -185,7 +185,7 @@ line_of() { grep -n -F -e "$1" "$TART_LOG" | head -1 | cut -d: -f1; }
 @test "preflight: EVERY IOS_LAN_PROBES target must be blocked (second one reachable -> refuse); a bad or empty list is refused; LAN_PROBE is not used" {
   cat > "$FAKE_BIN/tart-probe" <<'WRAP'
 #!/bin/bash
-case "$*" in *"nc -z -G 5 192.168.64.1 22"*) echo "$*" >> "$TART_LOG"; exit 0 ;; esac
+case "$*" in *"GHR_NC_RC=\$? _ 192.168.64.1 22"*) echo "$*" >> "$TART_LOG"; echo GHR_NC_RC=0; exit 0 ;; esac
 exec "$REAL_TART" "$@"
 WRAP
   chmod +x "$FAKE_BIN/tart-probe"
@@ -195,13 +195,44 @@ WRAP
   refute grep -q 'run.sh' "$TART_LOG"
   grep -q '^delete ghr-ios-1' "$TART_LOG"
   : > "$TART_LOG"
-  for bad in "" "nothost" "a:1;id"; do
+  for bad in "" "nothost" "a:1;id" "-evil:22"; do
     cp "$W/slots.env" "$W/slots2.env"
     printf "IOS_LAN_PROBES='%s'\n" "$bad" >> "$W/slots2.env"
     GHR_CONFIG="$W/slots2.env" run launch ios 1
     [ "$status" -eq 2 ]
   done
   [ ! -s "$TART_LOG" ]
+}
+
+@test "preflight: a failing 'tart exec' itself (agent/transport error, exit 1) is NOT 'blocked' -> refuse" {
+  FAKE_PROBE_EXEC_RC=1 run launch ios 1
+  [ "$status" -eq 3 ]
+  refute grep -q 'run.sh' "$TART_LOG"
+  grep -q '^delete ghr-ios-1' "$TART_LOG"
+}
+
+@test "runner starts in a LOGIN shell (bash -lc) with the runner dir as an argument" {
+  run launch ios 1
+  [ "$status" -eq 0 ]
+  grep -q 'exec -i ghr-ios-1 /bin/bash -lc cd "$1" && read -r J && exec ./run.sh --jitconfig "$J" _ /Users/admin/actions-runner' "$TART_LOG"
+}
+
+@test "keychain password file: a group/world-readable file, a symlink or a missing file is refused before any clone" {
+  chmod 0644 "$W/keychain.pass"
+  run launch ios 1
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"keychain password file"* ]]
+  chmod 0400 "$W/keychain.pass"
+  mv "$W/keychain.pass" "$W/real.pass"; ln -s "$W/real.pass" "$W/keychain.pass"
+  run launch ios 1
+  [ "$status" -eq 1 ]
+  rm "$W/keychain.pass"
+  run launch ios 1
+  [ "$status" -eq 1 ]
+  refute grep -q '^clone' "$TART_LOG"
+  chmod 0600 "$W/real.pass"; rm -f "$W/keychain.pass"; cp "$W/real.pass" "$W/keychain.pass"; chmod 0600 "$W/keychain.pass"
+  run launch ios 1
+  [ "$status" -eq 0 ]
 }
 
 @test "boot timeout: the guest agent never answers -> exit 1, runner never started, VM deleted" {
@@ -236,6 +267,8 @@ WRAP
   FAKE_CLONE_RC=1 run launch ios 1
   [ "$status" -eq 1 ]
   grep -q '^delete ghr-ios-1' "$TART_LOG"
+  # destroyed once, forgotten: the EXIT trap must not destroy it a second time
+  [ "$(grep -c '^delete ghr-ios-1' "$TART_LOG")" -eq 1 ]
   : > "$TART_LOG"
   FAKE_SET_RC=1 run launch ios 1
   [ "$status" -eq 1 ]

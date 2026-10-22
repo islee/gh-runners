@@ -144,18 +144,21 @@ preflight_probe_lima() {
 
 preflight_ready_tart() { run_bounded 20 "$TART" exec "$1" /usr/bin/true < /dev/null > /dev/null 2>&1; }
 preflight_probe_tart() {
-  # macOS guest: /usr/bin/nc -z -G <connect timeout> (no -w). nc exits 1 on refusal, unreachable and
-  # timeout alike (= blocked); 0 = connected; `tart exec` passes the guest exit code through unchanged. 127/126 (no nc), a `tart exec` transport error and signals
+  # macOS guest: /usr/bin/nc -z -G <connect timeout> (no -w: it misreports on this guest). nc exits 1
+  # on refusal, unreachable and timeout alike (= blocked); 0 = connected. 127/126 (no nc), a `tart exec` transport error and signals
   # are uninterpretable. The agent was proven reachable by preflight_ready_tart right before.
-  run_bounded 30 "$TART" exec "$1" /usr/bin/nc -z -G 5 "$2" "$3" < /dev/null > /dev/null 2>&1
-  case $? in 0) return 0 ;; 1) return 1 ;; *) return 2 ;; esac
+  # CRITICAL: the nc exit code is echoed INSIDE the guest and read from stdout. An exit 1 of `tart exec`
+  # itself (agent or transport error) would otherwise be indistinguishable from nc's "blocked".
+  local out
+  out=$(run_bounded 30 "$TART" exec "$1" /bin/sh -c '/usr/bin/nc -z -G 5 "$1" "$2" > /dev/null 2>&1; echo GHR_NC_RC=$?' _ "$2" "$3" < /dev/null 2> /dev/null) || return 2
+  case "$out" in GHR_NC_RC=0) return 0 ;; GHR_NC_RC=1) return 1 ;; *) return 2 ;; esac
 }
 
 # ghr_valid_probe_list LIST — non-empty, space/comma separated host:port entries.
 ghr_valid_probe_list() {
   local p n=0
   for p in ${1//,/ }; do
-    [[ "$p" =~ ^[A-Za-z0-9.-]+:[0-9]+$ ]] || return 1
+    [[ "$p" =~ ^[A-Za-z0-9][A-Za-z0-9.-]*:[0-9]+$ ]] || return 1
     n=$((n + 1))
   done
   [ "$n" -gt 0 ]
@@ -423,6 +426,23 @@ ios_wait_agent() {
   done
 }
 
+# ios_fail VM — destroy on an early-exit path and forget the VM only if it is verifiably gone (the EXIT
+# trap keeps the backstop when it is not).
+ios_fail() { if ios_destroy "$1"; then IOS_VM=""; fi; }
+
+# ios_check_keychain_pass — the keychain password file must be a regular file (not a link) owned by the
+# running user with mode 0400 or 0600; anything looser means someone else could have read or planted it.
+ios_check_keychain_pass() {
+  local f=$IOS_KEYCHAIN_PASS mode owner
+  if [ -f "$f" ] && ! [ -L "$f" ]; then
+    # GNU stat first: BSD stat rejects -c, while GNU stat -f means "filesystem" and would not fail.
+    { read -r mode owner < <(stat -c '%a %u' "$f" 2> /dev/null || stat -f '%Lp %u' "$f" 2> /dev/null); } || true
+    if { [ "$mode" = 400 ] || [ "$mode" = 600 ]; } && [ "$owner" = "$(id -u)" ]; then return 0; fi
+  fi
+  ghr_log "ios: keychain password file $f must be a regular file owned by $(id -un) with mode 0400/0600, refusing"
+  return 1
+}
+
 # ios_run N JIT — clone the golden, boot headless, wait for the agent, preflight, run the runner
 # through the agent, always delete.
 ios_run() {
@@ -437,31 +457,33 @@ ios_run() {
     ghr_log "ios: removing leftover $vm ($st)"
     ios_destroy "$vm" || return 1
   fi
+  ios_check_keychain_pass || return 1
   # From here on the VM must not outlive this call, whatever happens.
   IOS_VM=$vm
   "$TART" clone "$IOS_GOLDEN" "$vm" < /dev/null > /dev/null \
-    || { ghr_log "ios: clone failed"; ios_destroy "$vm"; return 1; }
+    || { ghr_log "ios: clone failed"; ios_fail "$vm"; return 1; }
   "$TART" set "$vm" --cpu "$IOS_CPUS" --memory "$IOS_MEM_MB" --random-mac < /dev/null > /dev/null \
-    || { ghr_log "ios: set failed"; ios_destroy "$vm"; return 1; }
+    || { ghr_log "ios: set failed"; ios_fail "$vm"; return 1; }
   # CRITICAL: a macOS guest cannot start (VZErrorDomain -9 "Failed to get current host key") unless the
   # VM owner's login keychain exists and is UNLOCKED. The password reaches `security` on STDIN only
   # (no -p: argv is world-readable). Failure = refuse; the VM is never started.
   "$SECURITY" unlock-keychain "$IOS_KEYCHAIN" < "$IOS_KEYCHAIN_PASS" > /dev/null 2>&1 \
-    || { ghr_log "ios: cannot unlock the login keychain $IOS_KEYCHAIN (see images/ios/README.md), refusing"; ios_destroy "$vm"; return 1; }
+    || { ghr_log "ios: cannot unlock the login keychain $IOS_KEYCHAIN (see images/ios/README.md), refusing"; ios_fail "$vm"; return 1; }
   # `tart run` blocks for the VM's whole life: background it, stdin closed, output to our stderr
   # (the slot log).
   "$TART" run "$vm" --no-graphics --no-audio < /dev/null >&2 &
   IOS_RUN_PID=$!
   rc=0
   ios_wait_agent "$vm" || rc=$?
-  [ "$rc" -eq 0 ] || { ios_destroy "$vm"; return "$rc"; }
-  [ "$SIGNALLED" -eq 0 ] || { ios_destroy "$vm"; return 143; }
-  launch_preflight "$vm" tart || { rc=$?; ios_destroy "$vm"; return "$rc"; }
-  [ "$SIGNALLED" -eq 0 ] || { ios_destroy "$vm"; return 143; }
+  [ "$rc" -eq 0 ] || { ios_fail "$vm"; return "$rc"; }
+  [ "$SIGNALLED" -eq 0 ] || { ios_fail "$vm"; return 143; }
+  launch_preflight "$vm" tart || { rc=$?; ios_fail "$vm"; return "$rc"; }
+  [ "$SIGNALLED" -eq 0 ] || { ios_fail "$vm"; return 143; }
   # The guest agent runs the command as the guest's default user (admin); read -r pulls the JIT
   # from stdin (-i attaches ours), same convention as the other classes. The dir is an argument,
   # not interpolated into the script.
-  run_watched "$jit" "$TART" exec -i "$vm" /bin/bash -c \
+  # LOGIN shell (-l): pod/fastlane (rbenv), node, pnpm, openjdk and xcbeautify are on PATH only there.
+  run_watched "$jit" "$TART" exec -i "$vm" /bin/bash -lc \
     'cd "$1" && read -r J && exec ./run.sh --jitconfig "$J"' _ "$IOS_RUNNER_DIR" || rc=$?
   if ios_destroy "$vm"; then IOS_VM=""; elif [ "$rc" -eq 0 ]; then rc=1; fi
   return "$rc"

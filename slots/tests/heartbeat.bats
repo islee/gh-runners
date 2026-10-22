@@ -569,12 +569,19 @@ at_ios() (
   IOS_SLOTS=1
   [ "$(at_ios 0 registered)" = "ok" ]              # first sighting
   [ "$(at_ios 60 registered)" = "ok" ]             # a light slot would be down here
-  [ "$(at_ios 300 registered)" = "ok" ]            # boundary: strictly greater
-  [ "$(at_ios 361 registered)" = "down" ]
+  [ "$(at_ios 599 registered)" = "ok" ]            # default 600 > boot (300) + two 60 s marks
+  [ "$(at_ios 661 registered)" = "down" ]
   # online again resets the clock
   printf '5\tghr-ios-1\tonline\tfalse\tghr-ios\n' >> "$RUNNERS"
-  [ "$(at_ios 400 registered)" = "ok" ]
+  [ "$(at_ios 700 registered)" = "ok" ]
   [ ! -e "$HB/notonline_ios-1" ]
+}
+
+@test "ios/supabase: 'releasing' (runner deleted, launch still tearing its VM down) is healthy for a while, busy for saturation, and a wedge after IOS_STUCK_SECS" {
+  IOS_SLOTS=1
+  [ "$(at_ios 0 releasing)" = "ok" ]
+  [ "$(at_ios 300 releasing)" = "ok/sat=ios" ]     # busy (saturation) but healthy; a supabase `registered` slot would be down after 45 s
+  [ "$(at_ios 661 releasing)" = "down" ]
 }
 
 @test "ios: IOS_STUCK_SECS is configurable" {
@@ -673,12 +680,37 @@ queued_job() { printf '{"id":%s,"status":"%s","labels":%s}' "$1" "$2" "$3"; }
   [ "$(stat -f %Lp "$GHR_DEMAND_DIR/ios" 2> /dev/null || stat -c %a "$GHR_DEMAND_DIR/ios")" = "644" ]
 }
 
-@test "demand probe: only a QUEUED job with exactly the ios label set counts" {
+@test "demand probe: only a QUEUED job whose labels include all of IOS_LABELS and nothing else (bar self-hosted) counts" {
   probe_setup
   route GET /repos/test-org/repo-a/actions/runs/101/jobs 200 "{\"jobs\":[$(queued_job 1 in_progress '["ghr-ios"]'),$(queued_job 2 queued '["ghr-ios","extra"]'),$(queued_job 3 queued '["ghr-light"]'),$(queued_job 4 queued '[]'),$(queued_job 5 waiting '["ghr-ios"]')]}"
   route GET /repos/test-org/repo-a/actions/runs/102/jobs 200 '{"jobs":[]}'
   probe_ios_demand 1234567
   [ ! -e "$GHR_DEMAND_DIR/ios" ]
+}
+
+@test "demand probe: [self-hosted, ghr-ios] and mixed case count; the run lists are limited to workflow_dispatch" {
+  probe_setup
+  route GET /repos/test-org/repo-a/actions/runs/101/jobs 200 "{\"jobs\":[$(queued_job 1 queued '["self-hosted","ghr-ios"]'),$(queued_job 2 queued '["GHR-IOS"]'),$(queued_job 3 queued '["self-hosted","macOS","ghr-ios"]')]}"
+  route GET /repos/test-org/repo-a/actions/runs/102/jobs 200 '{"jobs":[]}'
+  probe_ios_demand 55
+  [ "$(cat "$GHR_DEMAND_DIR/ios")" = "55 2" ]
+  [ "$(grep -c 'event=workflow_dispatch' "$CURL_ARGV_LOG")" -eq 2 ]
+}
+
+@test "demand probe: it is time-boxed (PROBE_BUDGET_SECS) -- over budget counts as a failure and leaves the file alone" {
+  probe_setup
+  echo "1111 3" > "$GHR_DEMAND_DIR/ios"
+  PROBE_BUDGET_SECS=0 run probe_ios_demand 9
+  [[ "$output" == *"WARN ios demand probe failed"* ]]
+  [ "$(cat "$GHR_DEMAND_DIR/ios")" = "1111 3" ]
+  [ ! -s "$CURL_LOG" ]
+}
+
+@test "demand probe: a missing or unwritable demand dir is an ERROR (the slot would never wake)" {
+  probe_setup
+  rm -rf "$GHR_DEMAND_DIR"
+  run probe_ios_demand 9
+  [[ "$output" == *"ERROR ios demand dir"* ]]
 }
 
 @test "demand probe: no demand removes an existing file; a successful empty answer is authoritative" {
@@ -750,6 +782,8 @@ queued_job() { printf '{"id":%s,"status":"%s","labels":%s}' "$1" "$2" "$3"; }
   [ "$status" -eq 0 ]
   grep -Eq '^[0-9]+ 1$' "$GHR_DEMAND_DIR/ios"
   grep -Eq 'value":"ok@[0-9]+"' "$CURL_LOG"
+  # the probe runs AFTER the state is published
+  [ "$(grep -n 'CALL PATCH' "$CURL_LOG" | tail -1 | cut -d: -f1)" -lt "$(grep -n 'CALL GET /repos/test-org/repo-a/actions/runs$' "$CURL_LOG" | head -1 | cut -d: -f1)" ]
   # the probe now fails (token for the actions API denied): state still published, file untouched
   : > "$CURL_LOG"
   before=$(cat "$GHR_DEMAND_DIR/ios")

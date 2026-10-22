@@ -470,12 +470,17 @@ do_launch() { echo launched >> "'"$W"'/launched"; sleep 3; echo done > "'"$W"'/j
   ios_env
   demand_on
   sup_state 2 yielded; sup_state 3 yielded
-  driver ios 1 'do_launch() { echo launched >> "'"$W"'/launched"; exec sleep 20; }'
+  driver ios 1 'do_launch() { echo launched >> "'"$W"'/launched"; printf "%s\n" "$JIT" | bash -c "sleep 3; echo exited > \"'"$W"'/launch.exit\""; }'
   wait_for test -e "$W/launched"
   demand_off
   wait_for test -e "$W/released"
   [ "$(cat "$W/released")" = "ghr-ios-1" ]
+  # the VM-owning launch is still alive: the lease is still held (supabase must not resume), state is not dormant
+  [ ! -e "$W/launch.exit" ]
+  [ -s "$GHR_CAP_DIR/ios.lease" ]
+  [ "$(state_of ios-1)" = releasing ]
   wait_for state_is ios-1 dormant
+  [ -e "$W/launch.exit" ]
   stop_driver
   grep -q 'no ios demand' "$W/loop.err"
   [ ! -e "$GHR_CAP_DIR/ios.lease" ]
@@ -550,7 +555,9 @@ lease_on() { date -u +%s > "$GHR_CAP_DIR/ios.lease"; }
 
 @test "supabase registered (job not started): a new lease releases the runner, abandons the launch, and 'yielded' appears only AFTER the launch exited" {
   ios_env
-  driver supabase 2 'do_launch() { echo launched >> "'"$W"'/launched"; trap "sleep 1; echo exited > \"'"$W"'/launch.exit\"; exit 143" TERM; sleep 30 & wait; }'
+  # production-shaped: like `printf | sudo launch`, the process that owns the VM is a pipeline CHILD of the
+  # do_launch subshell and is not signalled by killing that subshell; it ends once the runner is gone.
+  driver supabase 2 'do_launch() { echo launched >> "'"$W"'/launched"; printf "%s\n" "$JIT" | bash -c "sleep 3; echo exited > \"'"$W"'/launch.exit\""; }'
   wait_for test -e "$W/launched"
   lease_on
   wait_for state_is supabase-2 yielded
@@ -571,4 +578,31 @@ do_launch() { echo launched >> "'"$W"'/launched"; sleep 4; echo done > "'"$W"'/j
   [ -f "$W/job.done" ]
   stop_driver
   [ "$(grep -c launched "$W/launched")" -eq 1 ]
+}
+
+@test "ios: a failed launch drops the lease at once and the slot stays dormant for a cooldown despite fresh demand (no thrash)" {
+  ios_env
+  demand_on
+  sup_state 2 yielded; sup_state 3 yielded
+  driver ios 1 'IOS_COOLDOWN_BASE=3600
+do_launch() { echo launched >> "'"$W"'/launched"; return 3; }
+BACKOFF_MIN=1'
+  wait_for test -e "$W/launched"
+  wait_for test ! -e "$GHR_CAP_DIR/ios.lease"
+  # keep the demand fresh and the supabase slots yielded: without the cooldown ios would retake the lease
+  for _ in 1 2 3 4 5 6; do demand_on; sleep 1; done
+  stop_driver
+  [ "$(grep -c launched "$W/launched")" -eq 1 ]
+  [ ! -e "$GHR_CAP_DIR/ios.lease" ]
+  grep -q 'ios cycle failed: dormant for 3600s' "$W/loop.err"
+}
+
+@test "ios: the lease is refreshed right after mint, before the launch starts" {
+  ios_env
+  demand_on
+  sup_state 2 yielded; sup_state 3 yielded
+  driver ios 1 'do_mint() { echo "$1" >> "'"$W"'/minted"; rm -f "'"$GHR_CAP_DIR"'/ios.lease"; echo BLOB; }
+do_launch() { [ -s "'"$GHR_CAP_DIR"'/ios.lease" ] && echo held > "'"$W"'/held"; sleep 1; }'
+  wait_for test -e "$W/held"
+  stop_driver
 }

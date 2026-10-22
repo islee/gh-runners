@@ -67,6 +67,6 @@ xcrun simctl list runtimes >&2 || log "WARN simctl list runtimes failed"
 sudo systemsetup -setremotelogin off >&2 2>&1 \
   || { log "systemsetup refused; disabling the sshd launchd service instead"; sudo launchctl disable system/com.openssh.sshd >&2; }
 sudo launchctl bootout system/com.openssh.sshd >&2 2>&1 || true
-if /usr/bin/nc -z -w 2 127.0.0.1 22 > /dev/null 2>&1; then die "sshd still listens on port 22"; fi
+if /usr/bin/nc -z -G 2 127.0.0.1 22 > /dev/null 2>&1; then die "sshd still listens on port 22"; fi
 
 echo "PROVISION-OK ${RUNNER_VERSION} ${xcode_version}"
