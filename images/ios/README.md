@@ -110,3 +110,6 @@ IS reachable when unfiltered, plus the vmnet gateway's sshd (`192.168.64.1:22`).
    took the whole pool down for ~12 min. The script fails the build if port 22 still answers in the guest.
 10. Provisioning output is capped inside the guest (`IOS_PROVISION_OUT_MAX`, default 20 MB) for the same
    reason; past the cap the build fails instead of writing on.
+11. CocoaPods 1.17 fails on Ruby 4 (`ArgumentError - unknown keyword: quirks_mode`, json 3.x). The Cirrus
+   base sets rbenv's global to Ruby 4.x, so `provision.sh` switches it to the newest installed 3.x and gives
+   that Ruby the image's cocoapods/fastlane versions; the build fails if `pod --version` does not run.
