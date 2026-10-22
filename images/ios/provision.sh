@@ -111,7 +111,7 @@ dl_log="$(mktemp)"
 for v in $EXTRA_RUNTIMES; do
   log "downloading the iOS $v simulator runtime"
   # Progress output is long; keep it out of the (capped) provisioning output and show only a failure.
-  sudo xcodebuild -downloadPlatform iOS -buildVersion "$v" > "$dl_log" 2>&1 \
+  xcodebuild -downloadPlatform iOS -buildVersion "$v" > "$dl_log" 2>&1 \
     || { tail -20 "$dl_log" >&2; die "iOS $v runtime download failed"; }
 done
 rm -f "$dl_log"
