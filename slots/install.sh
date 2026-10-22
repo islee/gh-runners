@@ -7,13 +7,16 @@
 # What it does (in order):
 #   1. role accounts _ghrctl (mints runners, runs slot loops) and _ghrstate (heartbeat only),
 #      via sysadminctl -roleAccount (no login shell, no GUI, homes under /var/db)
-#   2. directories: /var/db/ghr (_ghrstate), /var/db/ghr/slots (_ghrctl), /usr/local/libexec/ghr
-#      and /usr/local/etc/ghr (root), /var/log/ghr
+#   2. directories: /var/db/ghr (_ghrstate), /var/db/ghr/slots (_ghrctl), /var/db/ghr/capacity
+#      (_ghrctl 0700, the ios lease), /var/db/ghr/demand (_ghrstate 0755, the ios demand file),
+#      /usr/local/libexec/ghr and /usr/local/etc/ghr (root), /var/log/ghr
 #   3. scripts -> /usr/local/libexec/ghr (root:wheel 0755; `.sh` stripped; lib/gh-app.sh alongside)
 #   4. config -> /usr/local/etc/ghr/slots.env (root 0644, NO secrets; only created if absent)
 #   5. optional App keys -> /var/db/_ghrctl/runner-app.pem, /var/db/_ghrstate/state-app.pem (0400)
 #   6. sudoers drop-in letting _ghrctl run ONLY the launch script as `ghr` (validated by visudo -c)
-#   7. render + bootstrap LaunchDaemons: dev.ghr.slot.light-1..N, dev.ghr.heartbeat, dev.ghr.pool
+#   7. render + bootstrap LaunchDaemons: dev.ghr.slot.light-1..N, supabase-1..N, ios-1 (IOS_SLOTS=1),
+#      dev.ghr.heartbeat, dev.ghr.pool
+# Tart (the ios class's hypervisor CLI) is NOT installed here: it is an operator step, see images/ios/README.md.
 # --uninstall reverses 3,6,7 and the state dir; --purge additionally removes config, keys, logs
 # and the role accounts (the `ghr` account and its Lima VMs are never touched).
 # --dry-run prints every action instead of executing it (no root needed, writes nothing).
@@ -40,6 +43,8 @@ CTL_UID="${GHRCTL_UID:-451}"
 STATE_UID="${GHRSTATE_UID:-452}"
 MAX_SLOTS=6
 MAX_SUPA_SLOTS=3
+# macOS licence: 2 VMs per host; one is enough and memory-bound.
+MAX_IOS_SLOTS=1
 
 DRY=0
 UNINSTALL=0
@@ -141,6 +146,8 @@ config_int() {
 slot_count() { config_int LIGHT_SLOTS 6 "$MAX_SLOTS"; }
 # supabase is opt-in: 0 (class disabled) unless configured; hard max 3 (RAM, see P0 sizing).
 supa_count() { config_int SUPABASE_SLOTS 0 "$MAX_SUPA_SLOTS"; }
+# ios is opt-in too (0|1): a dormant Tart VM slot.
+ios_count() { config_int IOS_SLOTS 0 "$MAX_IOS_SLOTS"; }
 
 # Source file -> installed name (".sh" stripped; launch.sh must become exactly `launch`).
 SCRIPTS="slot-loop mint-jit reconcile launch heartbeat pool reload-slot"
@@ -165,6 +172,10 @@ install_files() {
   fi
   run install -d -m 0755 -o "$STATE_USER" "$STATE_ROOT"
   run install -d -m 0755 -o "$CTL_USER" "$STATE_ROOT/slots"
+  # ios handshake: the lease is private to the controller (all slot loops run as it); the demand file is
+  # written by the heartbeat account and must be readable by the controller.
+  run install -d -m 0700 -o "$CTL_USER" "$STATE_ROOT/capacity"
+  run install -d -m 0755 -o "$STATE_USER" "$STATE_ROOT/demand"
   run install -d -m 0755 -o root -g wheel "$LOGDIR"
   # launchd opens StandardOutPath as the job's user only on some releases; pre-creating the files
   # with the right owner removes the question.
@@ -176,6 +187,7 @@ install_files() {
   if [ "$(supa_count)" -gt 0 ]; then
     for n in $(seq 1 "$(supa_count)"); do mkfile "$CTL_USER" "$LOGDIR/slot-supabase-$n.log"; done
   fi
+  if [ "$(ios_count)" -gt 0 ]; then mkfile "$CTL_USER" "$LOGDIR/slot-ios-1.log"; fi
   mkfile "$STATE_USER" "$LOGDIR/heartbeat.log"
   mkfile ghr "$LOGDIR/pool.log"
   install_newsyslog
@@ -196,6 +208,7 @@ install_newsyslog() {
     if [ "$(supa_count)" -gt 0 ]; then
       for n in $(seq 1 "$(supa_count)"); do echo "$LOGDIR/slot-supabase-$n.log $CTL_USER:wheel 640 5 5120 * JN"; done
     fi
+    if [ "$(ios_count)" -gt 0 ]; then echo "$LOGDIR/slot-ios-1.log $CTL_USER:wheel 640 5 5120 * JN"; fi
     echo "$LOGDIR/heartbeat.log $STATE_USER:wheel 640 5 5120 * JN"
     echo "$LOGDIR/pool.log ghr:wheel 640 5 5120 * JN"
   } > "$tmp"
@@ -353,6 +366,7 @@ install_daemons() {
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/ghr-plists.XXXXXX")
   install_slot_plists light "$count" "$MAX_SLOTS" "$tmp" "$ctl_home"
   install_slot_plists supabase "$(supa_count)" "$MAX_SUPA_SLOTS" "$tmp" "$ctl_home"
+  install_slot_plists ios "$(ios_count)" "$MAX_IOS_SLOTS" "$tmp" "$ctl_home"
   render_plist "$SRC/launchd/dev.ghr.heartbeat.plist" "$tmp/hb.plist" LIBEXEC="$LIBEXEC" STATE_HOME="$state_home" LOGDIR="$LOGDIR"
   run plutil -lint "$tmp/hb.plist"
   run install -m 0644 -o root -g wheel "$tmp/hb.plist" "$DAEMON_DIR/dev.ghr.heartbeat.plist"
@@ -372,18 +386,21 @@ do_uninstall() {
   done
   for n in $(seq 1 "$MAX_SLOTS"); do run launchctl bootout "system/dev.ghr.reload.light-$n" 2> /dev/null || true; done
   for n in $(seq 1 "$MAX_SUPA_SLOTS"); do run launchctl bootout "system/dev.ghr.reload.supabase-$n" 2> /dev/null || true; done
+  run launchctl bootout "system/dev.ghr.reload.ios-1" 2> /dev/null || true
   run rm -rf "$ETC_DIR/reload"
   for n in $(seq 1 "$MAX_SUPA_SLOTS"); do
     run launchctl bootout "system/dev.ghr.slot.supabase-$n" 2> /dev/null || true
     run rm -f "$DAEMON_DIR/dev.ghr.slot.supabase-$n.plist"
   done
+  run launchctl bootout "system/dev.ghr.slot.ios-1" 2> /dev/null || true
+  run rm -f "$DAEMON_DIR/dev.ghr.slot.ios-1.plist"
   for n in heartbeat pool; do
     run launchctl bootout "system/dev.ghr.$n" 2> /dev/null || true
     run rm -f "$DAEMON_DIR/dev.ghr.$n.plist"
   done
   run rm -f "$SUDOERS_FILE" "$NEWSYSLOG_FILE"
   run rm -rf "$LIBEXEC"
-  run rm -rf "$STATE_ROOT/slots"
+  run rm -rf "$STATE_ROOT/slots" "$STATE_ROOT/capacity" "$STATE_ROOT/demand"
   if [ "$PURGE" -eq 1 ]; then
     run rm -rf "$ETC_DIR" "$STATE_ROOT" "$LOGDIR"
     for n in "$CTL_USER" "$STATE_USER"; do

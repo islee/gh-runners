@@ -127,7 +127,10 @@ PY
   # patterns assembled from pieces so this file does not match itself
   a="lin""ple"; b="gyeol""hada"; c="BEGIN [A-Z ]*PRIV""ATE KEY"; d="192\.168\."
   # lib/pve-fw.sh legitimately names the private ranges it drops (checked separately in launch-pve.bats)
-  refute grep -rniE --exclude=pve-fw.sh "$a|$b|$c|$d" "$SLOTS_DIR"
+  refute grep -rniE --exclude=pve-fw.sh "$a|$b|$c" "$SLOTS_DIR"
+  # 192.168.64.0/24 is Tart's fixed vmnet NAT range (a product constant, not anyone's LAN); other 192.168.x are LAN
+  hits=$(grep -rnE --exclude=pve-fw.sh "$d" "$SLOTS_DIR" | grep -v '192\.168\.64\.' || true)
+  [ -z "$hits" ]
 }
 
 @test "every script has a header and none enables xtrace (would leak the JIT config)" {
@@ -201,4 +204,53 @@ assert p["ProgramArguments"] == ["/x/libexec/slot-loop", "supabase", "2"]
 assert p["StandardOutPath"] == "/x/log/slot-supabase-2.log"
 assert p["UserName"] == "_ghrctl" and p["AbandonProcessGroup"] is True
 PY
+}
+
+@test "ios plist/log/dirs are rendered ONLY when IOS_SLOTS=1 (default config: none); the capacity and demand dirs always exist" {
+  run bash "$SLOTS_DIR/install.sh" --dry-run
+  [ "$status" -eq 0 ]
+  refute grep -q 'dev.ghr.slot.ios' <<< "$output"
+  refute grep -q 'slot-ios' <<< "$output"
+  [[ "$output" == *"install -d -m 0700 -o _ghrctl $W/varghr/capacity"* ]]
+  [[ "$output" == *"install -d -m 0755 -o _ghrstate $W/varghr/demand"* ]]
+  printf 'IOS_SLOTS=1\n' > "$W/cfg.env"
+  run bash "$SLOTS_DIR/install.sh" --dry-run --config "$W/cfg.env"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"launchctl bootstrap system $W/daemons/dev.ghr.slot.ios-1.plist"* ]]
+  [[ "$output" == *"chmod 0640 $W/log/slot-ios-1.log"* ]]
+  refute grep -q 'ios-2' <<< "$output"
+}
+
+@test "ios slots are capped at 1; a disabled class has its stale plist removed; a plist from an earlier install is bootout'ed" {
+  printf 'IOS_SLOTS=5\n' > "$W/cfg.env"
+  run bash "$SLOTS_DIR/install.sh" --dry-run --config "$W/cfg.env"
+  [[ "$output" == *"dev.ghr.slot.ios-1.plist"* ]]
+  refute grep -q 'ios-2' <<< "$output"
+  mkdir -p "$W/daemons"; : > "$W/daemons/dev.ghr.slot.ios-1.plist"
+  printf 'IOS_SLOTS=0\n' > "$W/cfg.env"
+  run bash "$SLOTS_DIR/install.sh" --dry-run --config "$W/cfg.env"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"launchctl bootout system/dev.ghr.slot.ios-1"* ]]
+  [[ "$output" == *"rm -f $W/daemons/dev.ghr.slot.ios-1.plist"* ]]
+  refute grep -q 'bootstrap system .*ios' <<< "$output"
+}
+
+@test "uninstall covers the ios slot daemon, its reload helper, and the capacity/demand dirs" {
+  run bash "$SLOTS_DIR/install.sh" --dry-run --uninstall
+  [[ "$output" == *"launchctl bootout system/dev.ghr.slot.ios-1"* ]]
+  [[ "$output" == *"launchctl bootout system/dev.ghr.reload.ios-1"* ]]
+  [[ "$output" == *"rm -rf $W/varghr/slots $W/varghr/capacity $W/varghr/demand"* ]]
+}
+
+@test "ios plist renders with the class and slot in label, args and log path; reload-slot accepts the label" {
+  source "$SLOTS_DIR/install.sh"
+  render_plist "$SLOTS_DIR/launchd/dev.ghr.slot.plist" "$W/s.plist" CLASS=ios N=1 LIBEXEC=/x/libexec CTL_HOME=/var/db/_ghrctl LOGDIR=/x/log
+  python3 - "$W/s.plist" <<'PY'
+import plistlib, sys
+p = plistlib.load(open(sys.argv[1], "rb"))
+assert p["Label"] == "dev.ghr.slot.ios-1"
+assert p["ProgramArguments"] == ["/x/libexec/slot-loop", "ios", "1"]
+assert p["StandardOutPath"] == "/x/log/slot-ios-1.log"
+PY
+  grep -q 'light|supabase|ios' "$SLOTS_DIR/reload-slot.sh"
 }
